@@ -51,6 +51,11 @@ class Args:
     cuda: bool = True
     frameskip: int = 0  # 0 = game default (GameSpec.frameskip)
     obs: str = ""  # "" = game default (GameSpec.obs); "pixels" or "grid"
+    init_ckpt: str = ""  # start from this checkpoint's weights (fresh run; ignored when resume finds latest.pt)
+    stop_samples: int = 0  # 0 = off; else stop once samples >= stop_samples (LR still anneals over total_samples)
+    league_fraction: float = 0.0  # fraction of games vs frozen league opponents (opponent_ckpts + league_dir)
+    opponent_ckpts: tuple[str, ...] = ()  # checkpoint files loaded as league opponents
+    league_dir: str = ""  # every *.pt in this directory (sorted by name) is also a league opponent
 
 
 def auto_num_workers() -> int:
@@ -84,6 +89,16 @@ def make_snapshot_module(state_dict: dict, num_actions: int, device: torch.devic
     return net
 
 
+def check_ckpt_args(ckpt: dict, path: Path, args: Args) -> None:
+    """Refuse a checkpoint whose frameskip or obs kind differs from args (checked before any weights are loaded)."""
+    ckpt_frameskip = frameskip_from_args(ckpt["args"])
+    if ckpt_frameskip != args.frameskip:
+        raise ValueError(f"{path} was trained with frameskip {ckpt_frameskip}, but args.frameskip is {args.frameskip}")
+    ckpt_obs = obs_from_args(ckpt["args"])
+    if ckpt_obs != args.obs:
+        raise ValueError(f"{path} was trained with obs {ckpt_obs!r}, but args.obs is {args.obs!r}")
+
+
 def make_game_env(args: Args, num_workers: int):
     from fb9.envs import EnvConfig, VecGames  # imported lazily: the real env needs the ALE
 
@@ -106,6 +121,10 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor
     return adv, adv + values
 
 
+def league_summary(selfplay: SelfPlay) -> list[dict]:
+    return [{"name": s.name, "winrate": s.winrate} for s in selfplay.league]
+
+
 def save_checkpoint(ckpt_dir: Path, agent: nn.Module, optimizer: torch.optim.Optimizer, samples: int, updates: int,
                     selfplay: SelfPlay, args: Args) -> None:
     state = {
@@ -114,6 +133,7 @@ def save_checkpoint(ckpt_dir: Path, agent: nn.Module, optimizer: torch.optim.Opt
         "samples": samples,
         "updates": updates,
         "pool": [{"samples": s.samples, "winrate": s.winrate} for s in selfplay.pool],
+        "league": league_summary(selfplay),
         "args": asdict(args),
     }
     atomic_save(state, ckpt_dir / f"ckpt_{samples}.pt")
@@ -138,6 +158,8 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         raise ValueError(f"obs must be one of {OBS_KINDS}, got {args.obs!r}")
     if args.obs == "grid" and args.game != "surround":
         raise ValueError("obs 'grid' needs game 'surround' (the grid observation is defined for Surround only)")
+    if (args.opponent_ckpts or args.league_dir) and args.league_fraction == 0:
+        raise ValueError("opponent_ckpts / league_dir given but league_fraction is 0: the league would be unused")
     root = Path(root) if root is not None else REPO
     run_name = args.run_name or f"{args.game}_{datetime.now():%Y%m%d_%H%M%S}"
     run_dir = root / "runs" / run_name
@@ -156,23 +178,19 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     agent = make_agent(args.obs, num_actions).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
     selfplay = SelfPlay(args.num_games, args.pool_fraction, args.pool_size, seed=args.seed,
-                        bot_fraction=args.bot_fraction)
+                        bot_fraction=args.bot_fraction, league_fraction=args.league_fraction)
 
     samples, updates = 0, 0
-    if args.resume:
-        latest = ckpt_dir / "latest.pt"
+    latest = ckpt_dir / "latest.pt"
+    resumed_league: list[dict] = []
+    if args.resume and (latest.exists() or not args.init_ckpt):
         if not latest.exists():
             raise FileNotFoundError(f"--resume set but {latest} does not exist")
+        if args.init_ckpt:
+            print(f"note: {latest} exists, so init_ckpt {args.init_ckpt} is ignored (resuming)")
         ckpt = torch.load(latest, map_location=device, weights_only=False)
         # checked before any weights are loaded: a grid checkpoint does not fit a pixel network
-        ckpt_frameskip = frameskip_from_args(ckpt["args"])
-        if ckpt_frameskip != args.frameskip:
-            raise ValueError(f"{latest} was trained with frameskip {ckpt_frameskip}, but args.frameskip is "
-                             f"{args.frameskip}; resume with --frameskip {ckpt_frameskip}")
-        ckpt_obs = obs_from_args(ckpt["args"])
-        if ckpt_obs != args.obs:
-            raise ValueError(f"{latest} was trained with obs {ckpt_obs!r}, but args.obs is {args.obs!r}; "
-                             f"resume with --obs {ckpt_obs}")
+        check_ckpt_args(ckpt, latest, args)
         agent.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         samples, updates = int(ckpt["samples"]), int(ckpt["updates"])
@@ -182,9 +200,40 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
             snap = selfplay.add_snapshot(int(entry["samples"]),
                                          make_snapshot_module(snap_state["model"], num_actions, device, args.obs))
             snap.winrate = float(entry["winrate"])
+        resumed_league = ckpt.get("league", [])   # absent in checkpoints from before the league
         print(f"resumed {run_name} at samples={samples} updates={updates} pool={len(selfplay.pool)} "
               f"frameskip={args.frameskip} obs={args.obs}")
-    # Opponents are not checkpointed (envs restart on resume): pool games draw fresh opponents.
+    elif args.init_ckpt:
+        # fresh run: weights only; samples, updates, optimizer and pool start from zero
+        init_path = Path(args.init_ckpt)
+        init = torch.load(init_path, map_location=device, weights_only=False)
+        check_ckpt_args(init, init_path, args)
+        agent.load_state_dict(init["model"])
+        print(f"init weights from {init_path} (samples start at 0)")
+
+    # League opponents are loaded after the resume block so their winrates can be restored by name.
+    if args.league_dir and not Path(args.league_dir).is_dir():
+        raise FileNotFoundError(f"league_dir {args.league_dir} is not a directory")
+    league_paths = [Path(p) for p in args.opponent_ckpts]
+    if args.league_dir:
+        league_paths += sorted(Path(args.league_dir).glob("*.pt"))
+    loaded: set[str] = set()
+    for path in league_paths:
+        name = str(path.resolve())
+        if name in loaded:
+            continue
+        loaded.add(name)
+        league_ckpt = torch.load(path, map_location=device, weights_only=False)
+        check_ckpt_args(league_ckpt, path, args)
+        selfplay.add_league_opponent(name, make_snapshot_module(league_ckpt["model"], num_actions, device, args.obs))
+    saved_winrates = {e["name"]: float(e["winrate"]) for e in resumed_league}
+    for snap in selfplay.league:
+        if snap.name in saved_winrates:
+            snap.winrate = saved_winrates[snap.name]
+    if selfplay.league:
+        print(f"league: {len(selfplay.league)} opponents")
+
+    # Opponents are not checkpointed (envs restart on resume): pool and league games draw fresh opponents.
     selfplay.resample_opponents()
 
     T = args.num_steps
@@ -209,8 +258,9 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     recent = deque(maxlen=50)
     obs = env.reset()
     start = time.time()
+    stop_at = min(args.total_samples, args.stop_samples) if args.stop_samples > 0 else args.total_samples
 
-    while samples < args.total_samples:
+    while samples < stop_at:
         t0 = time.time()
         frac = max(0.0, 1.0 - updates / num_updates_total)
         for group in optimizer.param_groups:
@@ -313,9 +363,16 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         if "bot_winrate" in ps:
             writer.add_scalar("selfplay/bot_winrate", ps["bot_winrate"], samples)
             bwr = f" bwr {ps['bot_winrate']:.2f}"
+        lwr = ""
+        if selfplay.num_league_games:
+            writer.add_scalar("league/size", ps["league_size"], samples)
+            if "league_winrate_mean" in ps:
+                writer.add_scalar("league/winrate_mean", ps["league_winrate_mean"], samples)
+                writer.add_scalar("league/winrate_min", ps["league_winrate_min"], samples)
+                lwr = f" lwr {ps['league_winrate_mean']:.2f}"
         recent_mean = float(np.mean(recent)) if recent else float("nan")
         print(f"upd {updates} samples {samples} sps {sps:.0f} ret50 {recent_mean:.2f} pool {len(selfplay.pool)} "
-              f"wr {ps.get('winrate_mean', float('nan')):.2f}{bwr} pg {mean['pg']:.3f} v {mean['v']:.3f} "
+              f"wr {ps.get('winrate_mean', float('nan')):.2f}{bwr}{lwr} pg {mean['pg']:.3f} v {mean['v']:.3f} "
               f"ent {mean['ent']:.3f} kl {mean['kl']:.4f} ev {ev:.2f} t {t_rollout:.1f}+{t_update:.1f}s elapsed {time.time() - start:.0f}s",
               flush=True)
 
@@ -333,7 +390,8 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     writer.close()
     env.close()
     return {"run_name": run_name, "run_dir": str(run_dir), "ckpt_dir": str(ckpt_dir), "samples": samples,
-            "updates": updates, "batch_size": batch_size, "episode_returns": episode_returns}
+            "updates": updates, "batch_size": batch_size, "episode_returns": episode_returns,
+            "league": league_summary(selfplay)}
 
 
 if __name__ == "__main__":

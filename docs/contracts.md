@@ -238,10 +238,18 @@ Args (defaults): `game="surround"`, `run_name=None` (default `f"{game}_{timestam
 Self-play (`fb9/selfplay.py`):
 
 - Game layout: games `0 .. M-1` are **mirror** games (both slots controlled by the learner, both slots' samples are
-  trained on), `M = num_games - P - B`. Then `P = round(pool_fraction*num_games)` **pool** games, then
-  `B = round(bot_fraction*num_games)` **bot** games at the end (`P + B <= num_games`, both fractions in [0,1]).
-  Pool and bot games: the learner controls one seat (seat 0 for even game index, seat 1 for odd), the opponent the
-  other; only the learner's slot is trained on. Learner batch per update = (2M + (num_games-M)) × num_steps.
+  trained on), `M = num_games - P - L - B`. Then `P = round(pool_fraction*num_games)` **pool** games, then
+  `L = round(league_fraction*num_games)` **league** games, then `B = round(bot_fraction*num_games)` **bot** games at
+  the end (`P + L + B <= num_games`, all fractions in [0,1]).
+  Pool, league and bot games: the learner controls one seat (seat 0 for even game index, seat 1 for odd), the opponent
+  the other; only the learner's slot is trained on. Learner batch per update = (2M + (num_games-M)) × num_steps.
+- **League games** (`league_fraction`): the opponent is drawn by PFSP-hard weight from a separate `league` list of
+  frozen networks (`add_league_opponent`), which is never evicted. The entries are loaded at start from
+  `opponent_ckpts` and every `*.pt` in `league_dir` (de-duplicated by resolved path, obs/frameskip checked), and their
+  winrate EMAs (α=0.1, init 0.5) are checkpointed as `"league": [{"name", "winrate"}]` and restored by name on resume.
+  With an empty league, league games play the current learner (no training on that slot). League games are excluded
+  from the pool's PFSP updates. `league.py` builds on this: exploiters are trained against a frozen target (league
+  games only), then the main agent is trained against all exploiters so far.
 - **Bot games** (`bot_fraction`, Surround only; `train()` raises for other games): the opponent is `SurroundBot`
   (`fb9/bots.py`), played inside the env via `BOT_ACTION` (§3.2). Bot games never get a snapshot, are excluded from
   opponent groups and PFSP updates, and feed a separate `bot_winrate` (EMA, α=0.1, init 0.5; win/draw/loss = 1/0.5/0

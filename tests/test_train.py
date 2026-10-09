@@ -318,9 +318,138 @@ def test_obs_arg_validation() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_selfplay_league_games() -> None:
+    # 8 games: mirror 0,1; pool 2 (seat 0), 3 (seat 1); league 4 (seat 0), 5 (seat 1); bot 6 (seat 0), 7 (seat 1)
+    sp = SelfPlay(num_games=8, pool_fraction=0.25, pool_size=3, seed=0, bot_fraction=0.25, league_fraction=0.25)
+    assert (sp.num_mirror_games, sp.num_pool_games, sp.num_league_games, sp.num_bot_games) == (2, 2, 2, 2)
+    assert sp.learner_slots.tolist() == [0, 1, 2, 3, 4, 7, 8, 11, 12, 15], sp.learner_slots
+    assert sp.opponent_slots.tolist() == [5, 6, 9, 10, 13, 14], sp.opponent_slots
+    assert sp.bot_slots.tolist() == [13, 14]
+    assert [sp.is_league(g) for g in range(8)] == [False] * 4 + [True] * 2 + [False] * 2
+    assert [sp.is_bot(g) for g in range(8)] == [False] * 6 + [True] * 2
+
+    # empty pool and league: pool and league games use the current learner (None)
+    sp.resample_opponents()
+    assert all(sp.opponents[g] is None for g in (2, 3, 4, 5))
+    groups = sp.opponent_slot_groups()
+    assert len(groups) == 1 and groups[0][0] is None and sorted(groups[0][1].tolist()) == [5, 6, 9, 10]
+    assert sp.sample_league_opponent() is None
+    stats = sp.pool_stats()
+    assert stats["league_size"] == 0.0 and "league_winrate_mean" not in stats and "bot_winrate" in stats
+
+    # league entries are only drawn by league games; pool snapshots only by pool games
+    snap = sp.add_snapshot(10)
+    e1 = sp.add_league_opponent("exp_a")
+    e2 = sp.add_league_opponent("exp_b")
+    assert e1.samples == -1 and e1.name == "exp_a" and e1.winrate == 0.5 and e1 in sp.league
+    sp.resample_opponents()
+    assert sp.opponents[2] is snap and sp.opponents[3] is snap
+    assert sp.opponents[4] in (e1, e2) and sp.opponents[5] in (e1, e2)
+    sp.opponents[4], sp.opponents[5] = e1, e2
+    groups = {id(opp): sorted(slots.tolist()) for opp, slots in sp.opponent_slot_groups()}
+    assert groups == {id(snap): [5, 6], id(e1): [9], id(e2): [10]}, groups
+
+    # winrate EMA on a league game (game 4 learner seat 0 wins -> 0.55); re-sampled from the league
+    sp.on_episode_end(4, np.array([1.0, -1.0], dtype=np.float32))
+    assert abs(e1.winrate - 0.55) < 1e-9 and e2.winrate == 0.5 and snap.winrate == 0.5
+    assert sp.opponents[4] in (e1, e2)
+    # a pool game updates the pool snapshot only, and re-samples from the pool
+    sp.on_episode_end(2, np.array([1.0, -1.0], dtype=np.float32))
+    assert abs(snap.winrate - 0.55) < 1e-9 and e1.winrate == 0.55 and sp.opponents[2] is snap
+
+    e1.winrate, e2.winrate = 0.7, 0.3
+    stats = sp.pool_stats()
+    assert stats["league_size"] == 2.0 and abs(stats["league_winrate_mean"] - 0.5) < 1e-9
+    assert abs(stats["league_winrate_min"] - 0.3) < 1e-9 and stats["winrate_min"] == stats["winrate_mean"] == 0.55
+
+    # PFSP over the league: winrate 0.0 -> weight 1.05, winrate 1.0 -> weight 0.05
+    e1.winrate, e2.winrate = 0.0, 1.0
+    counts = {"exp_a": 0, "exp_b": 0}
+    for _ in range(2000):
+        counts[sp.sample_league_opponent().name] += 1
+    assert abs(counts["exp_a"] / 2000 - 1.05 / 1.10) < 0.03, counts
+
+    # league entries are kept in insertion order and are not part of the pool
+    assert [x.name for x in sp.league] == ["exp_a", "exp_b"] and snap not in sp.league
+
+    # without league games: no league keys; an empty league reports size 0 and no winrate keys
+    plain = SelfPlay(num_games=4, pool_fraction=0.5, pool_size=2, seed=0)
+    assert "league_size" not in plain.pool_stats() and len(plain.league_games) == 0
+    empty = SelfPlay(num_games=4, pool_fraction=0.0, pool_size=2, seed=0, league_fraction=0.5)
+    st = empty.pool_stats()
+    assert st["league_size"] == 0.0 and "league_winrate_mean" not in st and "league_winrate_min" not in st
+
+    for bad in (dict(pool_fraction=0.25, league_fraction=0.75, bot_fraction=0.5),
+                dict(pool_fraction=0.0, league_fraction=1.5)):
+        try:
+            SelfPlay(num_games=4, pool_size=2, seed=0, **bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad}")
+
+
+def test_train_league_init_and_stop() -> None:
+    root = Path(tempfile.mkdtemp(prefix="fb9_test_leaguetrain_"))
+    try:
+        train(tiny_args(run_name="base", total_samples=224), env_factory=fake_factory(), root=root)
+        base_ckpt = root / "checkpoints" / "base" / "latest.pt"
+        base = torch.load(base_ckpt, map_location="cpu", weights_only=False)
+        league_kw = dict(init_ckpt=str(base_ckpt), pool_fraction=0.0, league_fraction=1.0,
+                         opponent_ckpts=(str(base_ckpt),))
+        name = str(base_ckpt.resolve())
+
+        # fresh run with total 0: no updates, so the saved weights are exactly the init checkpoint's
+        train(tiny_args(run_name="fresh0", total_samples=0, **league_kw), env_factory=fake_factory(), root=root)
+        fresh0 = torch.load(root / "checkpoints" / "fresh0" / "latest.pt", map_location="cpu", weights_only=False)
+        assert fresh0["samples"] == 0 and fresh0["updates"] == 0
+        for k, v in base["model"].items():
+            assert torch.equal(v, fresh0["model"][k]), k
+        assert fresh0["league"] == [{"name": name, "winrate": 0.5}], fresh0["league"]
+
+        # stop_samples stops early (samples >= stop, < total) and still saves the final checkpoint
+        res = train(tiny_args(run_name="fresh", total_samples=512, stop_samples=256, **league_kw),
+                    env_factory=fake_factory(), root=root)
+        assert 256 <= res["samples"] < 512, res["samples"]
+        ckpt_path = root / "checkpoints" / "fresh" / "latest.pt"
+        s2 = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        assert s2["samples"] == res["samples"]
+        assert len(s2["league"]) == 1 and s2["league"][0]["name"] == name, s2["league"]
+        wr = s2["league"][0]["winrate"]
+        assert wr != 0.5, "league winrate should have moved, otherwise the restore check below proves nothing"
+        assert res["league"] == s2["league"]
+
+        # resume to the saved sample count: zero updates, the league winrate is restored by name
+        train(tiny_args(run_name="fresh", total_samples=s2["samples"], resume=True, **league_kw),
+              env_factory=fake_factory(), root=root)
+        s3 = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        assert s3["samples"] == s2["samples"] and s3["league"][0]["winrate"] == wr, s3["league"]
+
+        # league options without league games are refused
+        for bad in (dict(opponent_ckpts=(str(base_ckpt),)), dict(league_dir=str(root))):
+            try:
+                train(tiny_args(run_name="unused", **bad), env_factory=fake_factory(), root=root)
+            except ValueError:
+                continue
+            raise AssertionError(f"expected ValueError for {bad}")
+
+        # obs mismatch between an init or league checkpoint and args
+        train(tiny_args(run_name="px", obs="pixels", total_samples=0), env_factory=fake_factory(), root=root)
+        px_ckpt = str(root / "checkpoints" / "px" / "latest.pt")
+        for bad in (dict(init_ckpt=px_ckpt),
+                    dict(init_ckpt="", opponent_ckpts=(px_ckpt,), league_fraction=1.0, pool_fraction=0.0)):
+            try:
+                train(tiny_args(run_name="mismatch", total_samples=0, **bad), env_factory=fake_factory(), root=root)
+            except ValueError as e:
+                assert "obs" in str(e), e
+                continue
+            raise AssertionError(f"expected ValueError for {bad}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 TESTS = [test_model_shapes, test_selfplay_slots_and_pfsp, test_selfplay_bot_games, test_train_bot_fraction_smoke,
          test_learns_on_fake_env, test_checkpoint_resume, test_export_roundtrip, test_grid_obs_checkpoint_resume_and_export,
-         test_obs_arg_validation]
+         test_obs_arg_validation, test_selfplay_league_games, test_train_league_init_and_stop]
 
 if __name__ == "__main__":
     failed = 0
