@@ -22,6 +22,7 @@ Exported models (in `models/`, committed so a `git pull` on the laptop is enough
 | Folder | Checkpoint | Notes |
 |---|---|---|
 | `models/surround` | `surround_league_v1` 8M | **default**; fewest crashes against strong play |
+| `models/surround_league_16M` | `surround_league_v1` 16M | **strongest so far**: beats 10M and 12M 10–0 |
 | `models/surround_league_10M` | `surround_league_v1` 10M | beats the 8M default 10–0 in head-to-head games |
 | `models/surround_v4_30M` | `surround_v4` final | backup |
 | `models/surround_v4_12M` | `surround_v4` 12M | backup, the first agent that beat a scripted bot |
