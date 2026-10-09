@@ -344,6 +344,23 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   converged on a narrow style.
 - `surround_v3` = v2 + `--bot-fraction 0.25` (a quarter of the games vs the flood-fill SurroundBot, played inside the
   env workers), 30M samples. SearchBot stays held out for evaluation only.
+  Result: self-play Elo 2782 but **0/10 games vs both bots at every checkpoint**; training win rate vs the flood bot
+  stayed 0.04–0.28 with no trend. More data was not the fix.
+- **Supervised probe** (`tools/bc_probe.py`, job 50432, `runs/bc_probe/probe_v1.json`): imitate the flood bot's move
+  scores on 100k bot-vs-bot states (decisive ones kept, 10% of trivial ones), test on 20k unseen states. On forks
+  (legal moves differ by ≥10 cells of reachable area): pixel `Agent` 43% correct (random legal 50%), 35% illegal
+  moves, 86% on its own train states (memorises, doesn't generalise); grid `GridAgent` **86% correct, 0.1% illegal**
+  after 1–5 epochs. Conclusion: the 84×84 pixel observation was why v1–v3 couldn't see dead ends.
+- `surround_v4` = v3 with `obs="grid"` (18×38 cell grid, `GridAgent`), 30M samples, ~1.8k samples/s. Training win
+  rate vs the flood bot rose 0.2 → 0.99 between 2.2M and 2.9M. Held-out eval: **10/0 games vs the flood bot from 4M
+  on** (60–5 rounds at 6M), but 0/10 vs the search bot (score diff ≈ −19, flat from 4M through 14M).
+  Round-end analysis vs the search bot at 12M (62 rounds, both seats): ~half the losses are crashes near the bot's
+  head while the board is still open (many at the round's first head-to-head meeting, ~32 moves in); the rest come
+  after the bot cuts v4 off: in every separation v4 had the smaller region (by 6–450 cells). Greedy play doesn't
+  help (3/63 rounds, the same game repeated). v4 never learned to contest cutting points, because neither training
+  opponent (itself, the flood bot) plays them.
+- ⭐ **Candidate: `surround_v4` 12M** (`checkpoints/surround_v4/ckpt_12005376.pt`, copy kept at
+  `checkpoints/candidates/surround_v4_12M.pt`). The first agent that beats a scripted bot; not exported yet.
 
 ## 9. Risks and mitigations
 
