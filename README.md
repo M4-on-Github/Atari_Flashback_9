@@ -13,7 +13,7 @@ modules are in [docs/contracts.md](docs/contracts.md).
 | | |
 |---|---|
 | Surround agent | ✅ playable. Beats the scripted flood-fill bot 10/0, but still loses to the held-out search bot |
-| Exploiter league (`surround_league_v1`) | 🔄 training to make it stronger against the search bot |
+| Exploiter league (`surround_league_v1`) | ✅ done (20M). Much stronger in head-to-head games, still 0/10 vs the search bot |
 | Combat agent | ⏳ not trained yet |
 | Console play | ⏳ hardware being set up (capture card, Arduino, optocouplers) |
 
@@ -22,7 +22,8 @@ Exported models (in `models/`, committed so a `git pull` on the laptop is enough
 | Folder | Checkpoint | Notes |
 |---|---|---|
 | `models/surround` | `surround_league_v1` 8M | **default**; fewest crashes against strong play |
-| `models/surround_league_16M` | `surround_league_v1` 16M | **strongest so far**: beats 10M and 12M 10–0 |
+| `models/surround_league_20M` | `surround_league_v1` 20M (final) | **strongest**: beats 16M 10–0, 18M 8–2 |
+| `models/surround_league_16M` | `surround_league_v1` 16M | beats 10M and 12M 10–0 |
 | `models/surround_league_10M` | `surround_league_v1` 10M | beats the 8M default 10–0 in head-to-head games |
 | `models/surround_v4_30M` | `surround_v4` final | backup |
 | `models/surround_v4_12M` | `surround_v4` 12M | backup, the first agent that beat a scripted bot |

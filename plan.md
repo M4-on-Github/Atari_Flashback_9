@@ -370,6 +370,23 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   only games vs that frozen main agent), then trains the main agent 4M samples with 25% league games (PFSP over all
   exploiters so far), 20% pool, 20% flood bot, 35% mirror. ~30M samples in total (~1.5× the main agent's 20M).
   Success = wins vs the held-out SearchBot.
+  **Result:** the main agent kept getting stronger against its own past checkpoints, but it never beat SearchBot.
+  - Exploiter winrates vs the frozen main agent, rounds 1–5: 0.91, 1.00, 0.98, 0.95, 0.91. Every new exploiter still
+    beat the main agent easily.
+  - Main agent evals (2M–20M): SearchBot **0/10 at every checkpoint** (score diff −17.8 to −18.8); flood bot 10/0;
+    Elo 1000 → 2074.
+  - Head-to-head: 10M beats 8M 10–0; 16M beats 10M and 12M 10–0; 20M beats 16M 10–0 and 18M 8–2.
+  - Round-end analysis vs SearchBot (8M vs `surround_v4` 30M, ~60 rounds each):
+    - 8M crashes less on the open board (27 vs 38 losses while the two regions are still connected, none before move
+      62);
+    - but it loses more often after being cut off (31 vs 22), almost always holding the smaller region.
+  - **Conclusion:** exploiters warm-started from the main agent find its weaknesses, but they don't contest
+    territory either, so they don't teach cut-off play. Territory play is still the missing skill. Next options
+    (user's choice):
+    1. a play-time lookahead or safety filter;
+    2. Voronoi territory reward shaping;
+    3. training vs SearchBot with a deeper search bot as the new judge.
+  - Exported: `models/surround_league_{10M,16M,20M}`; `models/surround` = 8M.
 - ⭐ **Candidate: `surround_v4` 12M** (`checkpoints/surround_v4/ckpt_12005376.pt`, copy kept at
   `checkpoints/candidates/surround_v4_12M.pt`). The first agent that beats a scripted bot; not exported yet.
 
