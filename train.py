@@ -19,7 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from fb9.games import GAMES, frameskip_from_args
 from fb9.model import Agent
 from fb9.preprocess import OBS_SHAPE
-from fb9.selfplay import SelfPlay
+from fb9.selfplay import BOT_ACTION, SelfPlay
 
 REPO = Path(__file__).resolve().parent
 
@@ -44,6 +44,7 @@ class Args:
     pool_fraction: float = 0.25
     snapshot_every: int = 2_000_000
     pool_size: int = 20
+    bot_fraction: float = 0.0  # fraction of games whose opponent is SurroundBot (Surround only)
     checkpoint_every: int = 5_000_000
     resume: bool = False
     seed: int = 1
@@ -126,6 +127,8 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     """
     if args.game not in GAMES:
         raise ValueError(f"unknown game {args.game!r}; choose from {sorted(GAMES)}")
+    if args.bot_fraction > 0 and args.game != "surround":
+        raise ValueError("bot_fraction > 0 needs game 'surround' (the scripted bot only plays Surround)")
     if args.frameskip == 0:
         args.frameskip = GAMES[args.game].frameskip   # resolved here so checkpoints record the value used
     root = Path(root) if root is not None else REPO
@@ -145,7 +148,8 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
 
     agent = Agent(num_actions).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
-    selfplay = SelfPlay(args.num_games, args.pool_fraction, args.pool_size, seed=args.seed)
+    selfplay = SelfPlay(args.num_games, args.pool_fraction, args.pool_size, seed=args.seed,
+                        bot_fraction=args.bot_fraction)
 
     samples, updates = 0, 0
     if args.resume:
@@ -213,6 +217,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
                     net = agent if opp is None else opp.module
                     logits, _ = net(torch.from_numpy(obs[slots]).to(device))
                     actions[slots] = Categorical(logits=logits).sample().cpu().numpy()
+                actions[selfplay.bot_slots] = BOT_ACTION   # VecGames plays these seats with SurroundBot
             act_buf[step], logp_buf[step], val_buf[step] = act, logp, val
 
             next_obs, rewards, dones, infos = env.step(actions)
@@ -292,9 +297,13 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         if len(selfplay.pool) > 0:
             writer.add_scalar("pool/winrate_mean", ps["winrate_mean"], samples)
             writer.add_scalar("pool/winrate_min", ps["winrate_min"], samples)
+        bwr = ""
+        if "bot_winrate" in ps:
+            writer.add_scalar("selfplay/bot_winrate", ps["bot_winrate"], samples)
+            bwr = f" bwr {ps['bot_winrate']:.2f}"
         recent_mean = float(np.mean(recent)) if recent else float("nan")
         print(f"upd {updates} samples {samples} sps {sps:.0f} ret50 {recent_mean:.2f} pool {len(selfplay.pool)} "
-              f"wr {ps.get('winrate_mean', float('nan')):.2f} pg {mean['pg']:.3f} v {mean['v']:.3f} "
+              f"wr {ps.get('winrate_mean', float('nan')):.2f}{bwr} pg {mean['pg']:.3f} v {mean['v']:.3f} "
               f"ent {mean['ent']:.3f} kl {mean['kl']:.4f} ev {ev:.2f} t {t_rollout:.1f}+{t_update:.1f}s elapsed {time.time() - start:.0f}s",
               flush=True)
 

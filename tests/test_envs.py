@@ -295,6 +295,38 @@ def test_speed():
             vec.close()
 
 
+def test_bot_seat_in_process_and_workers():
+    """Seat 1 = BOT_ACTION (SurroundBot), seat 0 random: both paths agree exactly, and the bot wins most rounds."""
+    from fb9.selfplay import BOT_ACTION
+    n, steps = 4, 1200
+    cfg = EnvConfig(game="surround", train=True)
+    runs = {}
+    for workers in (0, 2):
+        vec = VecGames(cfg, num_games=n, num_workers=workers, seed=5)
+        try:
+            obs = [vec.reset()]
+            rng = np.random.default_rng(1)
+            infos_all: list[dict] = []
+            for _ in range(steps):
+                acts = np.zeros(vec.num_slots, dtype=np.int64)
+                acts[0::2] = rng.integers(0, vec.num_actions, size=n)
+                acts[1::2] = BOT_ACTION
+                o, _, _, infos = vec.step(acts)
+                obs.append(o)
+                infos_all.extend(infos)
+            runs[workers] = (np.stack(obs), infos_all)
+        finally:
+            vec.close()
+    assert np.array_equal(runs[0][0], runs[2][0]), "bot games differ between in-process and worker paths"
+    infos = runs[0][1]
+    rets = np.array([i["episode_return"] for i in infos])
+    bot_wins = int(np.sum(rets[:, 1] > rets[:, 0]))
+    print(f"    {len(infos)} finished episodes, bot (seat 1) better in {bot_wins}")
+    assert len(infos) >= 8, f"too few episodes finished: {len(infos)}"
+    assert bot_wins > 0.7 * len(infos), f"bot better in only {bot_wins}/{len(infos)} episodes"
+    assert rets[:, 1].sum() > rets[:, 0].sum(), "bot seat return sum should beat the random seat"
+
+
 if __name__ == "__main__":
     tests = [(name, fn) for name, fn in sorted(globals().items()) if name.startswith("test_") and callable(fn)]
     failed = 0

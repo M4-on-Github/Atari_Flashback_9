@@ -11,8 +11,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from fb9.bots import SurroundBot
 from fb9.games import GAMES
 from fb9.preprocess import OBS_SHAPE, OBS_SIZE, FrameStack, process_frame
+from fb9.selfplay import BOT_ACTION
 
 MAX_SEED = 2**31 - 1
 # Workers are single-threaded: without this each one starts thread pools sized to the whole node (oversubscription).
@@ -177,24 +179,37 @@ class _GameBank:
     def __init__(self, cfg: EnvConfig, game_ids: list[int], seed: int, obs: np.ndarray):
         self.ids = game_ids
         self.games = [TwoPlayerGame(cfg, seed + i) for i in game_ids]
+        # one scripted bot per game and seat (a bot tracks its own heading); only used where an action is BOT_ACTION
+        self.bots = [[SurroundBot(seed=2 * (seed + i) + p) for p in (0, 1)] for i in game_ids]
         self.obs = obs
 
     def reset(self) -> None:
-        for i, g in zip(self.ids, self.games):
+        for i, g, bots in zip(self.ids, self.games, self.bots):
             self.obs[2 * i:2 * i + 2] = g.reset()
+            for b in bots:
+                b.reset()
 
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, list[dict]]:
-        """actions (2*len(ids),) -> rewards, dones (both per slot, in bank order), infos. Auto-resets finished games."""
+        """actions (2*len(ids),) -> rewards, dones (both per slot, in bank order), infos. Auto-resets finished games.
+
+        A seat whose action is BOT_ACTION plays the game's SurroundBot, which reads the current screen.
+        """
         rewards = np.zeros(2 * len(self.ids), dtype=np.float32)
         dones = np.zeros(2 * len(self.ids), dtype=bool)
         infos: list[dict] = []
-        for j, (i, g) in enumerate(zip(self.ids, self.games)):
-            obs, r, done, info = g.step(actions[2 * j:2 * j + 2])
+        for j, (i, g, bots) in enumerate(zip(self.ids, self.games, self.bots)):
+            acts = actions[2 * j:2 * j + 2]
+            if (acts == BOT_ACTION).any():
+                rgb = g.render_rgb()
+                acts = np.array([bots[p].act(rgb, p) if acts[p] == BOT_ACTION else acts[p] for p in (0, 1)])
+            obs, r, done, info = g.step(acts)
             rewards[2 * j:2 * j + 2] = r
             if done:
                 dones[2 * j:2 * j + 2] = True
                 infos.append({"game": i, **info})
                 obs = g.reset()   # the returned obs is the first obs of the next episode
+                for b in bots:
+                    b.reset()
             self.obs[2 * i:2 * i + 2] = obs
         return rewards, dones, infos
 

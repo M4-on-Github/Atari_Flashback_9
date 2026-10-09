@@ -18,15 +18,32 @@ import torch  # noqa: E402
 from export import export  # noqa: E402
 from fake_env import FakeVecGames  # noqa: E402
 from fb9.model import Agent  # noqa: E402
-from fb9.selfplay import SelfPlay  # noqa: E402
+from fb9.selfplay import BOT_ACTION, SelfPlay  # noqa: E402
 from train import Args, train  # noqa: E402
 
 torch.set_num_threads(1)
 
 
-def fake_factory(num_actions: int = 3):
+class BotFakeVecGames(FakeVecGames):
+    """Fake env that counts BOT_ACTION slots and plays them as action 0 (the real VecGames plays SurroundBot)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bot_actions_seen = 0
+
+    def step(self, actions: np.ndarray):
+        a = np.asarray(actions).reshape(self.num_slots).copy()
+        self.bot_actions_seen += int(np.sum(a == BOT_ACTION))
+        a[a == BOT_ACTION] = 0
+        return super().step(a)
+
+
+def fake_factory(num_actions: int = 3, made: list | None = None):
     def make(args: Args, num_workers: int):
-        return FakeVecGames(args.num_games, num_actions=num_actions, seed=args.seed)
+        env = BotFakeVecGames(args.num_games, num_actions=num_actions, seed=args.seed)
+        if made is not None:
+            made.append(env)
+        return env
     return make
 
 
@@ -105,6 +122,64 @@ def test_selfplay_slots_and_pfsp() -> None:
     for k in (1, 2, 3):
         sp3.add_snapshot(k)
     assert [x.samples for x in sp3.pool] == [2, 3]
+
+
+def test_selfplay_bot_games() -> None:
+    # 8 games: mirror 0..3, pool 4 (seat 0), 5 (seat 1), bot 6 (seat 0), 7 (seat 1)
+    sp = SelfPlay(num_games=8, pool_fraction=0.25, pool_size=3, seed=0, bot_fraction=0.25)
+    assert (sp.num_mirror_games, sp.num_pool_games, sp.num_bot_games) == (4, 2, 2)
+    assert sp.bot_slots.tolist() == [13, 14], sp.bot_slots
+    assert sp.opponent_slots.tolist() == [9, 10, 13, 14]
+    assert sp.learner_slots.tolist() == list(range(8)) + [8, 11, 12, 15], sp.learner_slots
+    assert [sp.is_bot(g) for g in range(8)] == [False] * 6 + [True] * 2
+    assert sp.is_mirror(3) is True and sp.is_mirror(4) is False and sp.is_mirror(6) is False
+
+    # bot games never get a snapshot and are not in the opponent groups
+    snap = sp.add_snapshot(10)
+    sp.resample_opponents()
+    assert sp.opponents[6] is None and sp.opponents[7] is None
+    groups = sp.opponent_slot_groups()
+    assert len(groups) == 1 and groups[0][0] is snap and sorted(groups[0][1].tolist()) == [9, 10]
+    assert "bot_winrate" in sp.pool_stats() and sp.pool_stats()["bot_winrate"] == 0.5
+
+    # bot EMA: game 6 learner seat 0 wins -> 0.55; game 7 learner seat 1 loses -> 0.9 * 0.55
+    sp.on_episode_end(6, np.array([1.0, -1.0], dtype=np.float32))
+    assert abs(sp.bot_winrate - 0.55) < 1e-9, sp.bot_winrate
+    sp.on_episode_end(7, np.array([0.0, -1.0], dtype=np.float32))
+    assert abs(sp.bot_winrate - 0.9 * 0.55) < 1e-9, sp.bot_winrate
+    assert snap.winrate == 0.5 and sp.opponents[6] is None   # pool winrates untouched by bot games
+
+    # without bot games: no bot_winrate key, and the bot slots are empty
+    plain = SelfPlay(num_games=4, pool_fraction=0.5, pool_size=2, seed=0)
+    assert "bot_winrate" not in plain.pool_stats() and plain.bot_slots.size == 0
+
+    for bad in (dict(pool_fraction=0.5, bot_fraction=0.75), dict(pool_fraction=0.0, bot_fraction=1.5)):
+        try:
+            SelfPlay(num_games=4, pool_size=2, seed=0, **bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad}")
+
+
+def test_train_bot_fraction_smoke() -> None:
+    root = Path(tempfile.mkdtemp(prefix="fb9_test_bot_"))
+    made: list = []
+    try:
+        args = tiny_args(run_name="bots", bot_fraction=0.25, pool_fraction=0.25)   # 4 games: 2 mirror, 1 pool, 1 bot
+        res = train(args, env_factory=fake_factory(made=made), root=root)
+        env = made[0]
+        assert res["updates"] >= 1 and env.bot_actions_seen > 0, env.bot_actions_seen
+        s = torch.load(root / "checkpoints" / "bots" / "latest.pt", map_location="cpu", weights_only=False)
+        assert s["args"]["bot_fraction"] == 0.25
+        assert (root / "runs" / "bots").exists()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    try:
+        train(tiny_args(run_name="bad", bot_fraction=0.25, game="combat"), env_factory=fake_factory(), root=root)
+    except ValueError:
+        return
+    raise AssertionError("bot_fraction with game=combat should raise ValueError")
 
 
 def test_learns_on_fake_env() -> None:
@@ -188,8 +263,8 @@ def test_export_roundtrip() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-TESTS = [test_model_shapes, test_selfplay_slots_and_pfsp, test_learns_on_fake_env,
-         test_checkpoint_resume, test_export_roundtrip]
+TESTS = [test_model_shapes, test_selfplay_slots_and_pfsp, test_selfplay_bot_games, test_train_bot_fraction_smoke,
+         test_learns_on_fake_env, test_checkpoint_resume, test_export_roundtrip]
 
 if __name__ == "__main__":
     failed = 0

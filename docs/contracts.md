@@ -152,6 +152,11 @@ class VecGames:
   `multiprocessing.shared_memory` / `RawArray` buffer viewed as a numpy array); only actions/rewards/dones/infos go
   through pipes. Game `i` in worker `w` uses seed `seed + i`.
 - `num_workers=0` runs everything in-process (for tests and debugging).
+- **`BOT_ACTION = -1`** (defined in `fb9/selfplay.py`, re-used here): an action value for a slot means "this seat is
+  played by this game's `SurroundBot`". `_GameBank.step` (both in-process and in workers) replaces it, before
+  `TwoPlayerGame.step`, with `bot.act(render_rgb(), seat)`. Each game keeps one `SurroundBot` per seat (seeded from the
+  game seed, reset at every episode end). The bot's action then goes through the normal sticky/delay pipeline.
+  `TwoPlayerGame.step` itself never sees `BOT_ACTION`. Only Surround is supported.
 
 ### 3.3 Tests — `tests/test_envs.py`
 
@@ -183,14 +188,20 @@ Args (defaults): `game="surround"`, `run_name=None` (default `f"{game}_{timestam
 `num_games=64`, `num_workers=0→auto (os.cpu_count()-2)`, `num_steps=128`, `lr=2.5e-4` (linear anneal),
 `update_epochs=4`, `minibatch_size=2048` (minibatch count = round(batch/2048)), `gamma=0.99`, `gae_lambda=0.95`, `clip_coef=0.1`, `ent_coef=0.01`,
 `vf_coef=0.5`, `max_grad_norm=0.5`, `pool_fraction=0.25`, `snapshot_every=2_000_000`, `pool_size=20`,
-`checkpoint_every=5_000_000`, `resume=False`, `seed=1`, `cuda=True`.
+`checkpoint_every=5_000_000`, `resume=False`, `seed=1`, `cuda=True`, `bot_fraction=0.0`.
 
 Self-play (`fb9/selfplay.py`):
 
-- Games `0 .. M-1` are **mirror** games (both slots controlled by the learner, both slots' samples are trained on),
-  `M = num_games - round(pool_fraction*num_games)`. The rest are **pool** games: the learner controls one seat
-  (seat 0 for even game index, seat 1 for odd), a frozen snapshot controls the other; only the learner's slot is
-  trained on. Learner batch per update = (2M + (num_games-M)) × num_steps.
+- Game layout: games `0 .. M-1` are **mirror** games (both slots controlled by the learner, both slots' samples are
+  trained on), `M = num_games - P - B`. Then `P = round(pool_fraction*num_games)` **pool** games, then
+  `B = round(bot_fraction*num_games)` **bot** games at the end (`P + B <= num_games`, both fractions in [0,1]).
+  Pool and bot games: the learner controls one seat (seat 0 for even game index, seat 1 for odd), the opponent the
+  other; only the learner's slot is trained on. Learner batch per update = (2M + (num_games-M)) × num_steps.
+- **Bot games** (`bot_fraction`, Surround only; `train()` raises for other games): the opponent is `SurroundBot`
+  (`fb9/bots.py`), played inside the env via `BOT_ACTION` (§3.2). Bot games never get a snapshot, are excluded from
+  opponent groups and PFSP updates, and feed a separate `bot_winrate` (EMA, α=0.1, init 0.5; win/draw/loss = 1/0.5/0
+  by the sign of the learner's episode return). Not checkpointed (starts at 0.5 on resume).
+- **`SearchBot` (`fb9/search_bot.py`) is held out for evaluation only.** It must never be used as a training opponent.
 - A pool game's opponent is re-sampled at each of its episode ends. Until the pool has a snapshot, pool games use the
   current learner as opponent (no training on that slot).
 - Pool: snapshot the learner's weights every `snapshot_every` samples, keep the newest `pool_size`. Sampling weight
@@ -202,7 +213,8 @@ Self-play (`fb9/selfplay.py`):
 Outputs:
 
 - TensorBoard `runs/<run_name>/`: `charts/episode_return` (seat 0 of mirror games), `charts/episode_frames`,
-  `charts/sps`, `losses/*`, `pool/size`, `pool/winrate_mean`, `pool/winrate_min`.
+  `charts/sps`, `losses/*`, `pool/size`, `pool/winrate_mean`, `pool/winrate_min`, `selfplay/bot_winrate` (only when
+  `bot_fraction > 0`).
 - `checkpoints/<run_name>/ckpt_<samples>.pt` and `latest.pt` = `{"model", "optimizer", "samples", "updates",
   "pool": [{"samples": int, "winrate": float}], "args": dict}`; pool weights in
   `checkpoints/<run_name>/pool/snap_<samples>.pt` (`{"model": state_dict, "samples": int}`).
