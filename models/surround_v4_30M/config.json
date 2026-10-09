@@ -1,0 +1,29 @@
+{
+  "game": "surround",
+  "ale_mode": 1,
+  "action_ids": [
+    0,
+    2,
+    3,
+    4,
+    5
+  ],
+  "action_names": [
+    "NOOP",
+    "UP",
+    "RIGHT",
+    "LEFT",
+    "DOWN"
+  ],
+  "frameskip": 15,
+  "obs": "grid",
+  "stack": 2,
+  "obs_shape": [
+    6,
+    18,
+    38
+  ],
+  "seat_planes": "none (grid: occupied, own head, opponent head per frame)",
+  "samples": 30007296,
+  "source_ckpt": "checkpoints/surround_v4/ckpt_30007296.pt"
+}
