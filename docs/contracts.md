@@ -91,6 +91,43 @@ class FrameStack:
   and all-0 for the other (seat 0 → ch4=255, ch5=0; seat 1 → ch4=0, ch5=255).
 - The obs returned is a **new array** (callers may keep it).
 
+### 2.1 Grid observation (Surround default) — `fb9/grid.py`
+
+Surround's observation kind is `"grid"` (`GameSpec.obs`); Combat is `"pixels"`. Pixel models keep the §2 shape.
+
+```python
+GRID_STACK = 2                       # frames in the stack
+GRID_OBS_SHAPE = (6, 18, 38)         # 2 frames x 3 planes, uint8 values {0, 255}
+def classify_cells(rgb) -> np.ndarray       # (210,160,3) RGB -> (18,38) int8 codes: 0 empty, 1 wall, 2 blue, 3 green
+def grid_planes(codes, seat) -> np.ndarray  # (3,18,38) uint8: occupied, own head, opponent head
+class GridStack:
+    def __init__(self, seat: int)
+    def reset(self, rgb, codes=None) -> np.ndarray   # fill both frames with the current grid, return (6,18,38)
+    def push(self, rgb, codes=None) -> np.ndarray    # drop oldest, append, return (6,18,38)
+def obs_shape(kind: str) -> tuple                    # (6,84,84) for "pixels", (6,18,38) for "grid"
+```
+
+- Cells: the 18x38 play field; each cell is read as the mean RGB of a 3x2 patch at its centre, assigned the nearest
+  palette colour of `fb9/bots.py` (background, wall/trail, seat 0 colour, seat 1 colour). Capture-card noise is tolerated.
+- Planes per frame, in order: occupied (any non-empty cell, heads and trails), own head, opponent head. Own is the
+  seat's colour (seat 0 = blue, seat 1 = green), so the obs is seat-relative and has no seat planes.
+- Channel order: `[frame_oldest planes (3), frame_newest planes (3)]`.
+- Built from the RGB screen of the **last frame of each step** only (the same frame the pixel path uses last).
+- No augmentation (train-time augmentation applies to pixel obs only).
+- `fb9/grid.py` imports `fb9/bots.py` and `fb9/preprocess.py` only (no ALE import), so the console bridge can use it.
+
+**Observation kind (`obs`)** — one field, recorded everywhere the frameskip is:
+
+- `GameSpec.obs`: `"grid"` for Surround, `"pixels"` for Combat. `OBS_KINDS = ("pixels", "grid")`.
+- `EnvConfig.obs: str | None = None` (None = game default). `VecGames.obs_shape` gives the obs shape.
+- `train.py` `Args.obs: str = ""` ("" = game default, resolved in `train()` as frameskip is). Grid only for surround
+  (ValueError otherwise). The resolved value is recorded in the checkpoint args (`args["obs"]`). Resuming with a
+  different obs raises ValueError (checked before the weights are loaded).
+- Legacy default: anything without an `"obs"` key (old checkpoints' args, old `config.json`) is `"pixels"`
+  (`obs_from_args`, `LEGACY_OBS`, `Policy` default). Old models therefore keep working unchanged.
+- `export` writes `config.json` `"obs"`, `"obs_shape"` (`[6,18,38]` or `[6,84,84]`), `"stack"` (`GRID_STACK` = 2 for
+  grid, 4 for pixels), and `"seat_planes"` (a note, not planes, for grid).
+
 ## 3. Environment — `fb9/envs.py`
 
 ### 3.1 Single game: `TwoPlayerGame`
@@ -103,13 +140,16 @@ class EnvConfig:
     sticky_p: float = 0.25
     max_delay: int = 10         # frames; per-player delay d ~ U{0..max_delay}, redrawn each episode
     augment: bool = True        # only applies when train=True
+    frameskip: int | None = None  # emulator frames per decision; None = GameSpec.frameskip
+    obs: str | None = None      # "pixels" or "grid" (§2.1); None = GameSpec.obs
 
 class TwoPlayerGame:
     def __init__(self, cfg: EnvConfig, seed: int)
     num_actions: int
-    def reset(self) -> np.ndarray                      # obs (2,6,84,84) uint8: [seat0_obs, seat1_obs]
+    obs_kind: str; obs_shape: tuple                    # from cfg.obs (or the game default)
+    def reset(self) -> np.ndarray                      # obs (2,)+obs_shape uint8: [seat0_obs, seat1_obs]
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool, dict]
-        # actions: (2,) int action *indices*; returns obs (2,6,84,84), rewards (2,) float32 summed over the step's frames,
+        # actions: (2,) int action *indices*; returns obs (2,)+obs_shape (pixels (2,6,84,84), grid (2,6,18,38)), rewards (2,) float32 summed over the step's frames,
         # done (game over or max_frames reached), info. Does NOT auto-reset.
         # When done, info = {"episode_return": (2,) float32, "episode_frames": int}
     def render_rgb(self) -> np.ndarray                 # current full-screen RGB (for videos)
@@ -137,9 +177,10 @@ class VecGames:
     def __init__(self, cfg: EnvConfig, num_games: int, num_workers: int, seed: int)
     num_games: int; num_slots: int  # = 2*num_games
     num_actions: int
-    def reset(self) -> np.ndarray                                   # (2N,6,84,84) uint8
+    obs_shape: tuple                                                # (6,84,84) pixels, (6,18,38) grid
+    def reset(self) -> np.ndarray                                   # (2N,)+obs_shape uint8
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict]]
-        # actions (2N,) int; returns obs (2N,6,84,84) uint8, rewards (2N,) float32, dones (2N,) bool, infos
+        # actions (2N,) int; returns obs (2N,)+obs_shape uint8, rewards (2N,) float32, dones (2N,) bool, infos
         # Slot 2i = seat 0 of game i, slot 2i+1 = seat 1 of game i.
         # AUTO-RESET: if game i finished, dones[2i]=dones[2i+1]=True, rewards are the final step's rewards,
         # obs[2i:2i+2] is the FIRST obs of the new episode, and infos contains
@@ -180,6 +221,9 @@ class Agent(nn.Module):              # Nature CNN, orthogonal init (CleanRL ppo_
     def forward(self, obs_uint8: Tensor) -> tuple[Tensor, Tensor]   # (B,6,84,84) uint8 -> logits (B,A), value (B,)
                                                                      # divides by 255 internally
     def get_action_and_value(self, obs, action=None) -> (action, logprob, entropy, value)
+
+class GridAgent(nn.Module)           # conv actor-critic for the grid obs; same interface, input (B,6,18,38)
+def make_agent(obs_kind: str, num_actions: int) -> nn.Module    # Agent for "pixels", GridAgent for "grid"
 ```
 
 ### 4.2 `train.py` (CLI via tyro)
@@ -188,7 +232,8 @@ Args (defaults): `game="surround"`, `run_name=None` (default `f"{game}_{timestam
 `num_games=64`, `num_workers=0→auto (os.cpu_count()-2)`, `num_steps=128`, `lr=2.5e-4` (linear anneal),
 `update_epochs=4`, `minibatch_size=2048` (minibatch count = round(batch/2048)), `gamma=0.99`, `gae_lambda=0.95`, `clip_coef=0.1`, `ent_coef=0.01`,
 `vf_coef=0.5`, `max_grad_norm=0.5`, `pool_fraction=0.25`, `snapshot_every=2_000_000`, `pool_size=20`,
-`checkpoint_every=5_000_000`, `resume=False`, `seed=1`, `cuda=True`, `bot_fraction=0.0`.
+`checkpoint_every=5_000_000`, `resume=False`, `seed=1`, `cuda=True`, `bot_fraction=0.0`, `frameskip=0` (game default),
+`obs=""` (game default: grid for Surround, pixels for Combat; see §2.1).
 
 Self-play (`fb9/selfplay.py`):
 
@@ -225,8 +270,10 @@ Outputs:
 
 `export.py --ckpt checkpoints/<run>/latest.pt --out models/<game>/` writes `model.ts` (TorchScript of a wrapper:
 uint8 `(B,6,84,84)` → logits `(B,A)` float32, CPU) and `config.json`:
-`{"game", "ale_mode", "action_ids", "action_names", "frameskip": 15 (Surround) / 4 (Combat, legacy), "stack": 4, "obs_shape": [6,84,84],
-"seat_planes": "ch4=255 for seat0/port1, ch5=255 for seat1/port2", "samples", "source_ckpt"}`.
+`{"game", "ale_mode", "action_ids", "action_names", "frameskip": 15 (Surround) / 4 (Combat, legacy), "obs": "grid" | "pixels",
+"stack": 2 (grid) / 4 (pixels), "obs_shape": [6,18,38] (grid) / [6,84,84] (pixels),
+"seat_planes": "ch4=255 for seat0/port1, ch5=255 for seat1/port2" (pixels; a note for grid), "samples", "source_ckpt"}`.
+The uint8 input is `(B,)+obs_shape`. Configs without `"obs"`/`"obs_shape"` are pixels, `(6,84,84)`.
 The exported model must load with only `torch.jit.load` (no repo code).
 
 ## 5. Play and console bridge (laptop)
@@ -236,7 +283,9 @@ The exported model must load with only `torch.jit.load` (no repo code).
 ```python
 class Policy:                        # wraps an exported model.ts + config.json
     def __init__(self, model_dir: str, level: str = "hard")
-    def act(self, obs: np.ndarray) -> int   # obs (6,84,84) uint8 -> action index
+    obs_kind: str                        # config "obs" (default "pixels")
+    obs_shape: tuple                     # config "obs_shape" (default (6,84,84))
+    def act(self, obs: np.ndarray) -> int   # obs uint8 of obs_shape ((6,84,84) pixels or (6,18,38) grid) -> action index
 ```
 
 Levels (all sample from the softmax; argmax is weak when several actions do the same thing): `hard` = temperature 1.0;
@@ -248,7 +297,8 @@ Levels (all sample from the softmax; argmax is weak when several actions do the 
 **seat 0 / port 1** (keyboard arrows + space = fire; gamepad if present), model is seat 1. Uses `TwoPlayerGame`
 internals or a minimal ALE loop with `fb9/preprocess.py` exactly (`train=False`). Human input is read every
 emulator frame; the model decides every `frameskip` frames (from config.json: 15 for Surround) and its action is held for them. Shows score; R restarts,
-Esc quits. Must also work headless with `SDL_VIDEODRIVER=dummy` for a smoke test.
+Esc quits. Must also work headless with `SDL_VIDEODRIVER=dummy` for a smoke test. Grid models (`obs` "grid") use
+`GridStack(seat=1)` built from the emulator RGB screen of the last frame of each step; pixel models are unchanged.
 
 ### 5.3 `bridge/`
 
@@ -269,6 +319,9 @@ Esc quits. Must also work headless with `SDL_VIDEODRIVER=dummy` for a smoke test
 - `console_play.py --game surround --model models/surround --level hard --port /dev/ttyACM0 --device 0`: capture
   → crop (crop.json) → gray → every `frameskip`-th frame `process_frame(prev,last)` → `FrameStack(seat=1)` → `Policy` →
   `action_to_bitmask` → `JoystickLink.send`. Resets the stack when the frame changes drastically (new game).
+  Grid models (`obs` "grid"): on the last frame of each `frameskip` block the cropped RGB is resized to 160x210
+  (`cv2.INTER_AREA`) → `GridStack(seat=1)`; the first decision resets the stack, later ones push (no frame-diff reset).
+  Grid cells are classified by nearest emulator palette colour, so the console colours must match the emulator's.
   `--dry-run` uses `FakeLink` and `FileCapture`.
 - Must not import `multi_agent_ale_py` (laptop may not have it) — only `fb9/preprocess.py`, `fb9/policy.py`,
-  `fb9/games.py` (keep these three free of ALE imports).
+  `fb9/games.py`, `fb9/grid.py` (and `fb9/bots.py`, which `fb9/grid.py` uses for the palette) (keep these free of ALE imports).

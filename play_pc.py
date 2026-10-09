@@ -22,6 +22,7 @@ import pygame  # noqa: E402
 import tyro  # noqa: E402
 
 from fb9.games import GAMES, GameSpec  # noqa: E402
+from fb9.grid import GridStack  # noqa: E402
 from fb9.policy import Policy  # noqa: E402
 from fb9.preprocess import FrameStack, process_frame  # noqa: E402
 
@@ -119,14 +120,22 @@ def gray_of(ale) -> np.ndarray:
 
 
 class Episode:
-    """One game: the ALE instance, the model's frame stack and its held action."""
+    """One game: the ALE instance, the model's frame stack and its held action.
 
-    def __init__(self, spec: GameSpec, seed: int):
+    obs_kind "pixels": stacked 84x84 grayscale frames. "grid": Surround cell grid of the last frame of each step.
+    """
+
+    def __init__(self, spec: GameSpec, seed: int, obs_kind: str = "pixels"):
         self.spec = spec
         self.ale = make_ale(spec, seed)
-        g = gray_of(self.ale)
-        self.stack = FrameStack(seat=1)
-        self.obs = self.stack.reset(process_frame(g, g))  # first decision sees the reset screen
+        self.grid = obs_kind == "grid"
+        if self.grid:
+            self.stack = GridStack(seat=1)
+            self.obs = self.stack.reset(self.ale.getScreenRGB())  # first decision sees the reset screen
+        else:
+            g = gray_of(self.ale)
+            self.stack = FrameStack(seat=1)
+            self.obs = self.stack.reset(process_frame(g, g))  # first decision sees the reset screen
         self.model_idx = 0
         self.pos = 0            # emulator frame index within the current step (policy.frameskip frames)
         self.grays: list[np.ndarray] = []
@@ -145,8 +154,13 @@ class Episode:
         rewards = np.asarray(self.ale.act(ale_ids), dtype=np.float32)
         self.score += rewards
         self.frames += 1
-        self.grays.append(gray_of(self.ale))
         self.pos += 1
+        if self.grid:
+            if self.pos == policy.frameskip:   # the grid is read from the last frame of the step only
+                self.obs = self.stack.push(self.ale.getScreenRGB())
+                self.pos = 0
+            return
+        self.grays.append(gray_of(self.ale))
         if self.pos == policy.frameskip:
             # max-pool the last two frames of the step, then push into the model's stack
             self.obs = self.stack.push(process_frame(self.grays[-2], self.grays[-1]))
@@ -181,7 +195,7 @@ def run(args: Args) -> dict:
         if pygame.joystick.get_count():
             joy = pygame.joystick.Joystick(0)
             joy.init()
-        ep = Episode(spec, int(rng.integers(1, 2**31 - 1)))
+        ep = Episode(spec, int(rng.integers(1, 2**31 - 1)), policy.obs_kind)
         h, w = ep.ale.getScreenRGB().shape[:2]
         screen = pygame.display.set_mode((w * args.scale, h * args.scale + HUD_H))
         pygame.display.set_caption(f"FB9 {args.game} - you (port 1) vs model ({args.level})")
@@ -197,7 +211,7 @@ def run(args: Args) -> dict:
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     quit_now = True
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-                    ep = Episode(spec, int(rng.integers(1, 2**31 - 1)))
+                    ep = Episode(spec, int(rng.integers(1, 2**31 - 1)), policy.obs_kind)
                     episodes += 1
                     dir_order = []
             if quit_now or (args.max_frames and ticks >= args.max_frames):

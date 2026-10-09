@@ -17,7 +17,8 @@ import torch  # noqa: E402
 
 from export import export  # noqa: E402
 from fake_env import FakeVecGames  # noqa: E402
-from fb9.model import Agent  # noqa: E402
+from fb9.grid import GRID_OBS_SHAPE  # noqa: E402
+from fb9.model import Agent, GridAgent  # noqa: E402
 from fb9.selfplay import BOT_ACTION, SelfPlay  # noqa: E402
 from train import Args, train  # noqa: E402
 
@@ -40,7 +41,7 @@ class BotFakeVecGames(FakeVecGames):
 
 def fake_factory(num_actions: int = 3, made: list | None = None):
     def make(args: Args, num_workers: int):
-        env = BotFakeVecGames(args.num_games, num_actions=num_actions, seed=args.seed)
+        env = BotFakeVecGames(args.num_games, num_actions=num_actions, seed=args.seed, obs=args.obs)
         if made is not None:
             made.append(env)
         return env
@@ -185,7 +186,7 @@ def test_train_bot_fraction_smoke() -> None:
 def test_learns_on_fake_env() -> None:
     root = Path(tempfile.mkdtemp(prefix="fb9_test_learn_"))
     try:
-        args = tiny_args(run_name="learn", update_epochs=2)
+        args = tiny_args(run_name="learn", update_epochs=2, obs="pixels")
         res = train(args, env_factory=fake_factory(), root=root)
         rets = np.array(res["episode_returns"])
         assert len(rets) >= 20, f"too few episodes: {len(rets)}"
@@ -235,7 +236,7 @@ def test_checkpoint_resume() -> None:
 def test_export_roundtrip() -> None:
     root = Path(tempfile.mkdtemp(prefix="fb9_test_export_"))
     try:
-        args = tiny_args(run_name="export", total_samples=16 * 7 * 2)
+        args = tiny_args(run_name="export", total_samples=16 * 7 * 2, obs="pixels")
         train(args, env_factory=fake_factory(num_actions=5), root=root)
         ckpt = root / "checkpoints" / "export" / "latest.pt"
         out = root / "models" / "surround"
@@ -245,7 +246,7 @@ def test_export_roundtrip() -> None:
         import json
         cfg = json.loads((out / "config.json").read_text())
         assert cfg["game"] == "surround" and cfg["ale_mode"] == 1 and cfg["frameskip"] == 15 and cfg["stack"] == 4
-        assert cfg["obs_shape"] == [6, 84, 84] and cfg["action_ids"] == [0, 2, 3, 4, 5]
+        assert cfg["obs"] == "pixels" and cfg["obs_shape"] == [6, 84, 84] and cfg["action_ids"] == [0, 2, 3, 4, 5]
         assert len(cfg["action_names"]) == 5 and cfg["samples"] == 16 * 7 * 2
 
         model = torch.jit.load(str(out / "model.ts"), map_location="cpu")
@@ -263,8 +264,63 @@ def test_export_roundtrip() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_grid_obs_checkpoint_resume_and_export() -> None:
+    """Grid is the Surround default: checkpoint args record it, resume refuses another obs, export writes grid config."""
+    root = Path(tempfile.mkdtemp(prefix="fb9_test_grid_"))
+    try:
+        args = tiny_args(run_name="grid", total_samples=16 * 7 * 2, checkpoint_every=500)
+        assert args.obs == ""
+        train(args, env_factory=fake_factory(num_actions=5), root=root)
+        ckpt = root / "checkpoints" / "grid" / "latest.pt"
+        state = torch.load(ckpt, map_location="cpu", weights_only=False)
+        assert state["args"]["obs"] == "grid", state["args"]["obs"]
+
+        try:
+            train(tiny_args(run_name="grid", total_samples=16 * 7 * 2 + 1, resume=True, obs="pixels",
+                            checkpoint_every=500), env_factory=fake_factory(num_actions=5), root=root)
+        except ValueError as e:
+            assert "obs" in str(e), e
+        else:
+            raise AssertionError("resuming a grid checkpoint with obs=pixels should raise ValueError")
+
+        out = root / "models" / "surround_grid"
+        export(ckpt, out)
+        import json
+        cfg = json.loads((out / "config.json").read_text())
+        assert cfg["obs"] == "grid" and cfg["obs_shape"] == [6, 18, 38] and cfg["stack"] == 2, cfg
+        assert cfg["frameskip"] == 15 and cfg["samples"] == 16 * 7 * 2
+        assert list(GRID_OBS_SHAPE) == cfg["obs_shape"]
+
+        model = torch.jit.load(str(out / "model.ts"), map_location="cpu")
+        agent = GridAgent(num_actions=5)
+        agent.load_state_dict(state["model"])
+        agent.eval()
+        x = torch.randint(0, 256, (2,) + GRID_OBS_SHAPE, dtype=torch.uint8)
+        with torch.no_grad():
+            got = model(x)
+            ref, _ = agent(x)
+        assert got.shape == (2, 5) and got.dtype == torch.float32, got.shape
+        assert torch.allclose(got, ref, atol=1e-5), (got - ref).abs().max()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_obs_arg_validation() -> None:
+    root = Path(tempfile.mkdtemp(prefix="fb9_test_obsargs_"))
+    try:
+        for bad in (dict(obs="rgb"), dict(obs="grid", game="combat")):
+            try:
+                train(tiny_args(run_name="badobs", **bad), env_factory=fake_factory(), root=root)
+            except ValueError:
+                continue
+            raise AssertionError(f"expected ValueError for {bad}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 TESTS = [test_model_shapes, test_selfplay_slots_and_pfsp, test_selfplay_bot_games, test_train_bot_fraction_smoke,
-         test_learns_on_fake_env, test_checkpoint_resume, test_export_roundtrip]
+         test_learns_on_fake_env, test_checkpoint_resume, test_export_roundtrip, test_grid_obs_checkpoint_resume_and_export,
+         test_obs_arg_validation]
 
 if __name__ == "__main__":
     failed = 0

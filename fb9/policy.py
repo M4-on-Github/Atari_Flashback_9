@@ -28,19 +28,21 @@ class Policy:
         self.action_names: tuple[str, ...] = tuple(self.config["action_names"])
         self.num_actions = len(self.action_names)
         self.frameskip: int = int(self.config.get("frameskip", 4))  # emulator frames per decision (old configs: 4)
+        self.obs_kind: str = self.config.get("obs", "pixels")       # "pixels" (old configs: pixels) or "grid"
+        self.obs_shape: tuple[int, ...] = tuple(self.config.get("obs_shape", [6, 84, 84]))
         self.model = torch.jit.load(str(model_dir / "model.ts"), map_location="cpu").eval()
         self.rng = np.random.default_rng()  # tests may replace this for reproducibility
 
     @torch.no_grad()
     def logits(self, obs: np.ndarray) -> np.ndarray:
-        """obs (6,84,84) uint8 -> logits (A,) float32."""
-        if obs.shape != (6, 84, 84) or obs.dtype != np.uint8:
-            raise ValueError(f"obs must be uint8 (6,84,84), got {obs.dtype} {obs.shape}")
+        """obs uint8 of self.obs_shape (6,84,84 or 6,18,38) -> logits (A,) float32."""
+        if obs.shape != self.obs_shape or obs.dtype != np.uint8:
+            raise ValueError(f"obs must be uint8 {self.obs_shape}, got {obs.dtype} {obs.shape}")
         out = self.model(torch.from_numpy(obs[None].copy()))
         return out[0].float().numpy()
 
     def act(self, obs: np.ndarray) -> int:
-        """obs (6,84,84) uint8 -> action index in [0, num_actions)."""
+        """obs uint8 of self.obs_shape -> action index in [0, num_actions)."""
         logits = self.logits(obs)
         temperature = TEMPERATURE[self.level]
         if self.level == "easy" and self.rng.random() < EASY_RANDOM_P:

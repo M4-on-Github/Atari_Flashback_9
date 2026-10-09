@@ -16,9 +16,9 @@ import tyro
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from fb9.games import GAMES, frameskip_from_args
-from fb9.model import Agent
-from fb9.preprocess import OBS_SHAPE
+from fb9.games import GAMES, OBS_KINDS, frameskip_from_args, obs_from_args
+from fb9.grid import obs_shape
+from fb9.model import make_agent
 from fb9.selfplay import BOT_ACTION, SelfPlay
 
 REPO = Path(__file__).resolve().parent
@@ -50,6 +50,7 @@ class Args:
     seed: int = 1
     cuda: bool = True
     frameskip: int = 0  # 0 = game default (GameSpec.frameskip)
+    obs: str = ""  # "" = game default (GameSpec.obs); "pixels" or "grid"
 
 
 def auto_num_workers() -> int:
@@ -73,9 +74,9 @@ def atomic_save(obj: Any, path: Path) -> None:
     os.replace(tmp, path)
 
 
-def make_snapshot_module(state_dict: dict, num_actions: int, device: torch.device) -> Agent:
+def make_snapshot_module(state_dict: dict, num_actions: int, device: torch.device, obs_kind: str) -> nn.Module:
     """Frozen copy of a network for use as a pool opponent."""
-    net = Agent(num_actions).to(device)
+    net = make_agent(obs_kind, num_actions).to(device)
     net.load_state_dict(state_dict)
     net.eval()
     for p in net.parameters():
@@ -86,8 +87,8 @@ def make_snapshot_module(state_dict: dict, num_actions: int, device: torch.devic
 def make_game_env(args: Args, num_workers: int):
     from fb9.envs import EnvConfig, VecGames  # imported lazily: the real env needs the ALE
 
-    return VecGames(EnvConfig(game=args.game, train=True, frameskip=args.frameskip), args.num_games, num_workers,
-                    args.seed)
+    return VecGames(EnvConfig(game=args.game, train=True, frameskip=args.frameskip, obs=args.obs), args.num_games,
+                    num_workers, args.seed)
 
 
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, next_value: torch.Tensor,
@@ -105,7 +106,7 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor
     return adv, adv + values
 
 
-def save_checkpoint(ckpt_dir: Path, agent: Agent, optimizer: torch.optim.Optimizer, samples: int, updates: int,
+def save_checkpoint(ckpt_dir: Path, agent: nn.Module, optimizer: torch.optim.Optimizer, samples: int, updates: int,
                     selfplay: SelfPlay, args: Args) -> None:
     state = {
         "model": agent.state_dict(),
@@ -131,6 +132,12 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         raise ValueError("bot_fraction > 0 needs game 'surround' (the scripted bot only plays Surround)")
     if args.frameskip == 0:
         args.frameskip = GAMES[args.game].frameskip   # resolved here so checkpoints record the value used
+    if args.obs == "":
+        args.obs = GAMES[args.game].obs               # likewise: the obs kind is recorded in the checkpoint args
+    if args.obs not in OBS_KINDS:
+        raise ValueError(f"obs must be one of {OBS_KINDS}, got {args.obs!r}")
+    if args.obs == "grid" and args.game != "surround":
+        raise ValueError("obs 'grid' needs game 'surround' (the grid observation is defined for Surround only)")
     root = Path(root) if root is not None else REPO
     run_name = args.run_name or f"{args.game}_{datetime.now():%Y%m%d_%H%M%S}"
     run_dir = root / "runs" / run_name
@@ -146,7 +153,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     env = env_factory(args, num_workers) if env_factory is not None else make_game_env(args, num_workers)
     num_actions = env.num_actions
 
-    agent = Agent(num_actions).to(device)
+    agent = make_agent(args.obs, num_actions).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
     selfplay = SelfPlay(args.num_games, args.pool_fraction, args.pool_size, seed=args.seed,
                         bot_fraction=args.bot_fraction)
@@ -157,21 +164,26 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         if not latest.exists():
             raise FileNotFoundError(f"--resume set but {latest} does not exist")
         ckpt = torch.load(latest, map_location=device, weights_only=False)
-        agent.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        samples, updates = int(ckpt["samples"]), int(ckpt["updates"])
+        # checked before any weights are loaded: a grid checkpoint does not fit a pixel network
         ckpt_frameskip = frameskip_from_args(ckpt["args"])
         if ckpt_frameskip != args.frameskip:
             raise ValueError(f"{latest} was trained with frameskip {ckpt_frameskip}, but args.frameskip is "
                              f"{args.frameskip}; resume with --frameskip {ckpt_frameskip}")
+        ckpt_obs = obs_from_args(ckpt["args"])
+        if ckpt_obs != args.obs:
+            raise ValueError(f"{latest} was trained with obs {ckpt_obs!r}, but args.obs is {args.obs!r}; "
+                             f"resume with --obs {ckpt_obs}")
+        agent.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        samples, updates = int(ckpt["samples"]), int(ckpt["updates"])
         for entry in ckpt["pool"]:
             snap_state = torch.load(pool_dir / f"snap_{entry['samples']}.pt", map_location=device,
                                     weights_only=False)
             snap = selfplay.add_snapshot(int(entry["samples"]),
-                                         make_snapshot_module(snap_state["model"], num_actions, device))
+                                         make_snapshot_module(snap_state["model"], num_actions, device, args.obs))
             snap.winrate = float(entry["winrate"])
         print(f"resumed {run_name} at samples={samples} updates={updates} pool={len(selfplay.pool)} "
-              f"frameskip={args.frameskip}")
+              f"frameskip={args.frameskip} obs={args.obs}")
     # Opponents are not checkpointed (envs restart on resume): pool games draw fresh opponents.
     selfplay.resample_opponents()
 
@@ -185,7 +197,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     snap_bucket = samples // args.snapshot_every
     ckpt_bucket = samples // args.checkpoint_every
 
-    obs_buf = torch.zeros((T, Lc) + OBS_SHAPE, dtype=torch.uint8, device=device)
+    obs_buf = torch.zeros((T, Lc) + obs_shape(args.obs), dtype=torch.uint8, device=device)
     act_buf = torch.zeros((T, Lc), dtype=torch.long, device=device)
     logp_buf = torch.zeros((T, Lc), device=device)
     val_buf = torch.zeros((T, Lc), device=device)
@@ -237,7 +249,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
 
         # ---- PPO update ----
         t_update = time.time()
-        b_obs = obs_buf.reshape((-1,) + OBS_SHAPE)
+        b_obs = obs_buf.reshape((-1,) + obs_shape(args.obs))
         b_act = act_buf.reshape(-1)
         b_logp = logp_buf.reshape(-1)
         b_val = val_buf.reshape(-1)
@@ -312,7 +324,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
             snap_bucket = samples // args.snapshot_every
             cpu_state = {k: v.detach().cpu() for k, v in agent.state_dict().items()}
             atomic_save({"model": cpu_state, "samples": samples}, pool_dir / f"snap_{samples}.pt")
-            selfplay.add_snapshot(samples, make_snapshot_module(agent.state_dict(), num_actions, device))
+            selfplay.add_snapshot(samples, make_snapshot_module(agent.state_dict(), num_actions, device, args.obs))
         if samples // args.checkpoint_every > ckpt_bucket:
             ckpt_bucket = samples // args.checkpoint_every
             save_checkpoint(ckpt_dir, agent, optimizer, samples, updates, selfplay, args)

@@ -13,7 +13,8 @@ import numpy as np
 
 from fb9.bots import SurroundBot
 from fb9.games import GAMES
-from fb9.preprocess import OBS_SHAPE, OBS_SIZE, FrameStack, process_frame
+from fb9.grid import GridStack, classify_cells, obs_shape
+from fb9.preprocess import OBS_SIZE, FrameStack, process_frame
 from fb9.selfplay import BOT_ACTION
 
 MAX_SEED = 2**31 - 1
@@ -30,6 +31,7 @@ class EnvConfig:
     max_delay: int = 10         # frames; per-player delay d ~ U{0..max_delay}, redrawn each episode
     augment: bool = True        # only applies when train=True
     frameskip: int | None = None  # emulator frames per decision; None = GameSpec.frameskip
+    obs: str | None = None        # "pixels" or "grid"; None = GameSpec.obs
 
 
 class TwoPlayerGame:
@@ -42,6 +44,10 @@ class TwoPlayerGame:
         self.spec = GAMES[cfg.game]
         self.num_actions = self.spec.num_actions
         self.frameskip = cfg.frameskip if cfg.frameskip is not None else self.spec.frameskip
+        self.obs_kind = cfg.obs if cfg.obs is not None else self.spec.obs
+        self.obs_shape = obs_shape(self.obs_kind)
+        if self.obs_kind == "grid" and cfg.game != "surround":
+            raise ValueError(f"grid observations are only defined for surround, not {cfg.game}")
         self.rng = np.random.Generator(np.random.PCG64(seed))
         self._ids = self.spec.action_ids
         self._rom = self.spec.rom_path()
@@ -52,9 +58,12 @@ class TwoPlayerGame:
 
         self._delay_on = cfg.train and cfg.max_delay > 0
         self._sticky_on = cfg.train and cfg.sticky_p > 0
-        self._aug_on = cfg.train and cfg.augment
+        self._aug_on = cfg.train and cfg.augment and self.obs_kind == "pixels"   # no pixel augmentation for grids
         self._L = cfg.max_delay + 1 if self._delay_on else 1   # length of the intended-action history
-        self._stacks = [FrameStack(seat=0), FrameStack(seat=1)]
+        if self.obs_kind == "grid":
+            self._stacks = [GridStack(seat=0), GridStack(seat=1)]
+        else:
+            self._stacks = [FrameStack(seat=0), FrameStack(seat=1)]
         self._ale_acts = np.zeros(2, dtype=np.int32)
         self._over = True
 
@@ -86,6 +95,9 @@ class TwoPlayerGame:
         self.t = 0
         self._over = False
 
+        if self.obs_kind == "grid":
+            codes = classify_cells(self.ale.getScreenRGB())
+            return np.stack([self._stacks[p].reset(None, codes) for p in (0, 1)])
         g = self.ale.getScreenGrayscale()
         frame = process_frame(g, g)
         return np.stack([self._stacks[p].reset(self._augment(p, frame)) for p in (0, 1)])
@@ -93,10 +105,11 @@ class TwoPlayerGame:
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool, dict]:
         """Advance self.frameskip emulator frames with the given action indices (2,).
 
-        The screen is read only for the last two frames of the step. If the game ends before those, the screen of the
-        last executed frame is used as both prev and last.
+        Pixel obs: the screen is read only for the last two frames of the step. If the game ends before those, the
+        screen of the last executed frame is used as both prev and last. Grid obs: only the RGB screen of the last
+        executed frame is read.
 
-        Returns obs (2,6,84,84), rewards (2,) float32 summed over the executed frames, done, info.
+        Returns obs (2,)+obs_shape, rewards (2,) float32 summed over the executed frames, done, info.
         When done, info = {"episode_return": (2,) float32, "episode_frames": int}.
         """
         if self._over:
@@ -124,17 +137,23 @@ class TwoPlayerGame:
             self.t = t + 1
             ended = self.ale.game_over() or self.t >= max_frames
             # screens are only needed for the last two frames of a step (or the current one if the game ends
-            # earlier in the step, in which case prev = last = the current screen)
-            if k >= self.frameskip - 2 or ended:
+            # earlier in the step, in which case prev = last = the current screen); grid obs need only the last
+            if self.obs_kind == "grid":
+                if k == self.frameskip - 1 or ended:
+                    last = self.ale.getScreenRGB()
+            elif k >= self.frameskip - 2 or ended:
                 prev, last = last, self.ale.getScreenGrayscale()
             if ended:
                 done = True
                 break
-        if prev is None:   # game ended on the first frame of the step
-            prev = last
-
-        frame = process_frame(prev, last)
-        obs = np.stack([self._stacks[p].push(self._augment(p, frame)) for p in (0, 1)])
+        if self.obs_kind == "grid":
+            codes = classify_cells(last)
+            obs = np.stack([self._stacks[p].push(None, codes) for p in (0, 1)])
+        else:
+            if prev is None:   # game ended on the first frame of the step
+                prev = last
+            frame = process_frame(prev, last)
+            obs = np.stack([self._stacks[p].push(self._augment(p, frame)) for p in (0, 1)])
         self._ep_return += rewards
         info: dict = {}
         if done:
@@ -248,7 +267,8 @@ class VecGames:
         self.num_games = num_games
         self.num_slots = 2 * num_games
         self.num_actions = GAMES[cfg.game].num_actions
-        shape = (self.num_slots,) + OBS_SHAPE
+        self.obs_shape = obs_shape(cfg.obs if cfg.obs is not None else GAMES[cfg.game].obs)
+        shape = (self.num_slots,) + self.obs_shape
         self._closed = False
         self._workers: list[tuple] = []   # (process, connection, slot indices)
         if num_workers == 0:

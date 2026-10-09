@@ -4,6 +4,11 @@ Loop: capture frame -> crop (bridge/crop.json) -> gray -> every `frameskip`-th f
 84x84 -> FrameStack(seat=1) -> Policy -> action_to_bitmask -> JoystickLink.send (1 byte to the Arduino).
 A new game is detected when the 84x84 frame jumps (mean abs diff > reset_threshold); the stack is then reset.
 
+Grid models (config "obs": "grid", Surround): the cropped RGB of the last frame of each step is resized to the emulator
+screen size (160x210) and classified into the 18x38 cell grid (fb9/grid.py) -> GridStack(seat=1). The first decision
+resets the stack; later ones push. Grid mode classifies cells by the nearest emulator palette colour (fb9/bots.py), so
+the console colours must be close to the emulator's. Calibration with a reference screenshot checks this.
+
     container/run.sh python bridge/console_play.py --game surround --model models/surround --level hard \
         --port /dev/ttyACM0 --device 0
     container/run.sh python bridge/console_play.py --dry-run --video recording.avi   # no hardware: FakeLink
@@ -15,14 +20,18 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from dataclasses import dataclass  # noqa: E402
 
+import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import tyro  # noqa: E402
 
 from bridge.capture import Capture, FileCapture, crop_rgb, load_crop  # noqa: E402
 from bridge.serial_link import FakeLink, JoystickLink  # noqa: E402
 from fb9.games import GAMES, action_to_bitmask  # noqa: E402
+from fb9.grid import GridStack  # noqa: E402
 from fb9.policy import Policy  # noqa: E402
 from fb9.preprocess import FrameStack, process_frame, to_gray  # noqa: E402
+
+SCREEN_W, SCREEN_H = 160, 210   # emulator screen size; grid mode resizes the cropped console frame to it
 
 
 @dataclass
@@ -65,7 +74,8 @@ def run(args: Args, link=None, source=None) -> dict:
             device = int(args.device) if args.device.isdigit() else args.device
             source = Capture(device, args.width, args.height, args.fps)
 
-    stack = FrameStack(seat=1)
+    grid = policy.obs_kind == "grid"
+    stack = GridStack(seat=1) if grid else FrameStack(seat=1)
     prev_gray = None
     last84 = None
     masks: list[int] = []
@@ -77,18 +87,29 @@ def run(args: Args, link=None, source=None) -> dict:
                 rgb, _ = source.read()
             except EOFError:
                 break
-            gray = to_gray(crop_rgb(rgb, crop))
             pos = i % policy.frameskip
-            if pos == policy.frameskip - 2:
-                prev_gray = gray
-            elif pos == policy.frameskip - 1:
-                frame84 = process_frame(prev_gray, gray)
-                if last84 is None or frame_diff(frame84, last84) > args.reset_threshold:
-                    obs = stack.reset(frame84)
-                    resets += 1
-                else:
-                    obs = stack.push(frame84)
-                last84 = frame84
+            obs = None
+            if grid:
+                if pos == policy.frameskip - 1:
+                    screen = cv2.resize(crop_rgb(rgb, crop), (SCREEN_W, SCREEN_H), interpolation=cv2.INTER_AREA)
+                    if not masks:   # first decision: new game, so start the stack afresh
+                        obs = stack.reset(screen)
+                        resets += 1
+                    else:
+                        obs = stack.push(screen)
+            else:
+                gray = to_gray(crop_rgb(rgb, crop))
+                if pos == policy.frameskip - 2:
+                    prev_gray = gray
+                elif pos == policy.frameskip - 1:
+                    frame84 = process_frame(prev_gray, gray)
+                    if last84 is None or frame_diff(frame84, last84) > args.reset_threshold:
+                        obs = stack.reset(frame84)
+                        resets += 1
+                    else:
+                        obs = stack.push(frame84)
+                    last84 = frame84
+            if obs is not None:
                 action = policy.act(obs)
                 mask = action_to_bitmask(policy.action_names[action])
                 link.send(mask)

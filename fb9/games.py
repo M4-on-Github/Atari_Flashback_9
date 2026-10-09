@@ -16,6 +16,7 @@ class GameSpec:
     action_ids: tuple[int, ...]
     max_frames: int = 108_000
     frameskip: int = 4   # emulator frames per agent decision (Surround: 15 = one cell move)
+    obs: str = "pixels"  # observation kind: "pixels" (84x84 stacked screen) or "grid" (Surround cell grid)
 
     @property
     def action_names(self) -> tuple[str, ...]:
@@ -31,7 +32,7 @@ class GameSpec:
 
 
 GAMES: dict[str, GameSpec] = {
-    "surround": GameSpec("surround", "surround", mode=1, action_ids=(0, 2, 3, 4, 5), frameskip=15),
+    "surround": GameSpec("surround", "surround", mode=1, action_ids=(0, 2, 3, 4, 5), frameskip=15, obs="grid"),
     "combat": GameSpec("combat", "combat", mode=2, action_ids=tuple(range(18))),
 }
 
@@ -48,3 +49,12 @@ _BITS = {"UP": 1, "DOWN": 2, "LEFT": 4, "RIGHT": 8, "FIRE": 16}
 def action_to_bitmask(name: str) -> int:
     """ALE action name -> joystick bitmask (bit0 UP, bit1 DOWN, bit2 LEFT, bit3 RIGHT, bit4 FIRE)."""
     return sum(bit for key, bit in _BITS.items() if key in name)
+
+
+OBS_KINDS = ("pixels", "grid")
+LEGACY_OBS = "pixels"   # checkpoints saved before the obs kind was recorded have no "obs" in their args
+
+
+def obs_from_args(args: dict) -> str:
+    """Observation kind recorded in a checkpoint's (or config's) args; old checkpoints without the field use pixels."""
+    return args.get("obs") or LEGACY_OBS

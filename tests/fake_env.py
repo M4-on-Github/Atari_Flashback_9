@@ -7,11 +7,12 @@ Episodes last U{min_len..max_len} agent steps; episode_frames reports that step 
 """
 import numpy as np
 
-from fb9.preprocess import OBS_SHAPE
+from fb9.grid import obs_shape
 
 
 class FakeVecGames:
-    def __init__(self, num_games: int, num_actions: int = 3, seed: int = 0, min_len: int = 20, max_len: int = 60):
+    def __init__(self, num_games: int, num_actions: int = 3, seed: int = 0, min_len: int = 20, max_len: int = 60,
+                 obs: str = "pixels"):
         self.num_games = num_games
         self.num_slots = 2 * num_games
         self.num_actions = num_actions
@@ -22,7 +23,8 @@ class FakeVecGames:
         self.length = np.zeros(num_games, dtype=np.int64)
         self.t = np.zeros(num_games, dtype=np.int64)
         self.ret = np.zeros((num_games, 2), dtype=np.float32)
-        self.obs = np.zeros((self.num_slots,) + OBS_SHAPE, dtype=np.uint8)
+        self.obs_shape = obs_shape(obs)   # (6,84,84) for pixels, (6,18,38) for grid; both have 6 channels
+        self.obs = np.zeros((self.num_slots,) + self.obs_shape, dtype=np.uint8)
 
     def _new_episode(self, g: int) -> None:
         self.target[g] = self.rng.integers(self.num_actions)

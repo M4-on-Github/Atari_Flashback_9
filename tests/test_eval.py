@@ -18,9 +18,13 @@ import torch  # noqa: E402
 
 from fb9.bots import (BG, SEAT_COLORS, WALL, X0, Y0, CELL_H, CELL_W, NCOLS, NROWS, RandomBot,  # noqa: E402
                       SurroundBot, parse_grid, S_DOWN, S_LEFT, S_RIGHT, S_UP)
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+
 from fb9.envs import EnvConfig, TwoPlayerGame  # noqa: E402
-from fb9.model import Agent  # noqa: E402
-from fb9.evaluate import Args, evaluate  # noqa: E402
+from fb9.model import Agent, GridAgent  # noqa: E402
+from fb9.evaluate import Args, _load_agent, evaluate  # noqa: E402
 
 torch.set_num_threads(1)
 OPPOSITE = {S_UP: S_DOWN, S_DOWN: S_UP, S_LEFT: S_RIGHT, S_RIGHT: S_LEFT}
@@ -130,6 +134,41 @@ def test_evaluate_end_to_end():
         again = evaluate(Args(run=run, game="surround", episodes=2, concurrency=4), root=root, max_steps=60)
         assert len(again["evaluated"]) == 2
         print(f"    end-to-end: elo {elo['ratings']}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_evaluate_legacy_pixel_and_grid_checkpoints():
+    """A pixel checkpoint without 'obs' in its args loads as pixel Agent; a grid checkpoint evaluates, and it skips
+    the pixel checkpoint as an opponent (printed note, no vs_prev games)."""
+    root = Path(tempfile.mkdtemp(prefix="fb9_eval_obs_"))
+    try:
+        run = "obs_run"
+        ckpt_dir = root / "checkpoints" / run
+        ckpt_dir.mkdir(parents=True)
+        pixel = Agent(5)
+        torch.save({"model": pixel.state_dict(), "optimizer": {}, "samples": 1000, "updates": 1, "pool": [],
+                    "args": {"game": "surround", "frameskip": 15}}, ckpt_dir / "ckpt_1000.pt")
+        grid = GridAgent(5)
+        torch.save({"model": grid.state_dict(), "optimizer": {}, "samples": 2000, "updates": 1, "pool": [],
+                    "args": {"game": "surround", "obs": "grid", "frameskip": 15}}, ckpt_dir / "ckpt_2000.pt")
+
+        agent, frameskip, obs_kind = _load_agent(ckpt_dir / "ckpt_1000.pt", 5)
+        assert isinstance(agent, Agent) and frameskip == 15 and obs_kind == "pixels", (type(agent), frameskip, obs_kind)
+        agent, frameskip, obs_kind = _load_agent(ckpt_dir / "ckpt_2000.pt", 5)
+        assert isinstance(agent, GridAgent) and frameskip == 15 and obs_kind == "grid", (type(agent), obs_kind)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            state = evaluate(Args(run=run, game="surround", episodes=2, concurrency=4), root=root, max_steps=60)
+        assert [e["samples"] for e in state["evaluated"]] == [1000, 2000], state["evaluated"]
+        first, second = state["evaluated"]
+        assert first["vs_random"]["games"] == 2 and first["vs_prev"] == {}, first
+        assert second["vs_random"]["games"] == 2 and second["vs_prev"] == {}, second
+        assert "skip opponent ckpt_1000.pt: obs pixels != grid of ckpt_2000.pt" in out.getvalue(), out.getvalue()
+        assert (root / "runs" / run / "videos" / "2000.mp4").exists()
+        elo = json.loads((root / "runs" / run / "eval" / "elo.json").read_text())
+        assert set(elo["ratings"]) == {"ckpt_1000.pt", "ckpt_2000.pt"}, elo
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

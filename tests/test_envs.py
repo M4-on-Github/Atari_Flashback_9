@@ -35,7 +35,7 @@ def _same_info(a: dict, b: dict) -> bool:
 
 def test_shapes_dtypes_seats():
     for train in (False, True):
-        g = TwoPlayerGame(EnvConfig(game="surround", train=train), seed=0)
+        g = TwoPlayerGame(EnvConfig(game="surround", train=train, obs="pixels"), seed=0)
         obs = g.reset()
         assert obs.shape == (2,) + OBS_SHAPE and obs.dtype == np.uint8, (obs.shape, obs.dtype)
         assert np.all(obs[0, 4] == 255) and np.all(obs[0, 5] == 0)
@@ -50,7 +50,7 @@ def test_shapes_dtypes_seats():
     obs = TwoPlayerGame(cfg, seed=0).reset()
     assert obs.shape == (2,) + OBS_SHAPE
     assert np.all(obs[0, 4] == 255) and np.all(obs[1, 5] == 255)
-    vec = VecGames(EnvConfig(game="surround", train=True), num_games=2, num_workers=0, seed=0)
+    vec = VecGames(EnvConfig(game="surround", train=True, obs="pixels"), num_games=2, num_workers=0, seed=0)
     vobs = vec.reset()
     assert vobs.shape == (4,) + OBS_SHAPE and vobs.dtype == np.uint8
     assert vec.num_slots == 4 and vec.num_games == 2 and vec.num_actions == 5
@@ -58,7 +58,7 @@ def test_shapes_dtypes_seats():
 
 
 def test_eval_stacks_identical_and_deterministic():
-    cfg = EnvConfig(game="surround", train=False)
+    cfg = EnvConfig(game="surround", train=False, obs="pixels")
     rng = np.random.default_rng(0)
     seq = rng.integers(0, 5, size=(60, 2))
     runs = []

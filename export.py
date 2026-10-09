@@ -12,15 +12,16 @@ import torch.nn as nn
 import tyro
 from torch import Tensor
 
-from fb9.games import GAMES, frameskip_from_args
-from fb9.model import Agent
-from fb9.preprocess import OBS_SHAPE, STACK
+from fb9.games import GAMES, frameskip_from_args, obs_from_args
+from fb9.grid import GRID_STACK, obs_shape
+from fb9.model import make_agent
+from fb9.preprocess import STACK
 
 
 class LogitsWrapper(nn.Module):
-    """uint8 (B,6,84,84) -> float32 logits (B,A). The only thing the exported graph computes."""
+    """uint8 (B,6,84,84) pixel or (B,6,18,38) grid -> float32 logits (B,A). The only thing the exported graph computes."""
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: nn.Module):
         super().__init__()
         self.agent = agent
 
@@ -35,11 +36,12 @@ def export(ckpt_path: str | Path, out_dir: str | Path) -> Path:
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     game = state["args"]["game"]
     spec = GAMES[game]
-    agent = Agent(spec.num_actions)
+    obs_kind = obs_from_args(state["args"])
+    agent = make_agent(obs_kind, spec.num_actions)
     agent.load_state_dict(state["model"])
     agent.eval()
     wrapper = LogitsWrapper(agent).eval()
-    example = torch.zeros((2,) + OBS_SHAPE, dtype=torch.uint8)
+    example = torch.zeros((2,) + obs_shape(obs_kind), dtype=torch.uint8)
     with torch.no_grad():
         traced = torch.jit.trace(wrapper, example)
 
@@ -49,15 +51,19 @@ def export(ckpt_path: str | Path, out_dir: str | Path) -> Path:
     traced.save(str(tmp))
     os.replace(tmp, out / "model.ts")
 
+    grid = obs_kind == "grid"
     config = {
         "game": game,
         "ale_mode": spec.mode,
         "action_ids": list(spec.action_ids),
         "action_names": list(spec.action_names),
         "frameskip": frameskip_from_args(state["args"]),
-        "stack": STACK,
-        "obs_shape": list(OBS_SHAPE),
-        "seat_planes": "ch4=255 for seat0/port1, ch5=255 for seat1/port2",
+        "obs": obs_kind,
+        "stack": GRID_STACK if grid else STACK,
+        "obs_shape": list(obs_shape(obs_kind)),
+        # grid planes are seat-relative (occupied, own head, opponent head): no seat planes
+        "seat_planes": "none (grid: occupied, own head, opponent head per frame)" if grid
+        else "ch4=255 for seat0/port1, ch5=255 for seat1/port2",
         "samples": int(state["samples"]),
         "source_ckpt": str(ckpt_path),
     }

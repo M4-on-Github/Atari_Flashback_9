@@ -26,6 +26,7 @@ from bridge import console_play  # noqa: E402
 from bridge.capture import crop_rgb, load_crop, save_crop  # noqa: E402
 from bridge.serial_link import FakeLink  # noqa: E402
 from fb9.games import ACTION_NAMES, GAMES, action_to_bitmask  # noqa: E402
+from fb9.grid import GridStack, classify_cells, grid_planes, obs_shape  # noqa: E402
 from fb9.policy import Policy  # noqa: E402
 
 
@@ -41,14 +42,15 @@ class DummyNet(torch.nn.Module):
         return self.lin(feats)
 
 
-def write_dummy_model(model_dir: str, game: str) -> None:
-    """Writes model.ts + config.json in the §4.3 format into model_dir."""
+def write_dummy_model(model_dir: str, game: str, obs: str = "pixels") -> None:
+    """Writes model.ts + config.json in the §4.3 format into model_dir (obs "pixels" or "grid")."""
     spec = GAMES[game]
     torch.manual_seed(0)
     scripted = torch.jit.script(DummyNet(spec.num_actions).eval())
     scripted.save(os.path.join(model_dir, "model.ts"))
     config = {"game": game, "ale_mode": spec.mode, "action_ids": list(spec.action_ids),
-              "action_names": list(spec.action_names), "frameskip": 4, "stack": 4, "obs_shape": [6, 84, 84],
+              "action_names": list(spec.action_names), "frameskip": 4, "obs": obs,
+              "stack": 2 if obs == "grid" else 4, "obs_shape": list(obs_shape(obs)),
               "seat_planes": "ch4=255 for seat0/port1, ch5=255 for seat1/port2", "samples": 0,
               "source_ckpt": "test"}
     with open(os.path.join(model_dir, "config.json"), "w") as f:
@@ -106,6 +108,40 @@ def test_policy_frameskip_from_config():
         with open(cfg_path, "w") as f:
             json.dump(config, f)
         assert Policy(d).frameskip == 4
+
+
+def test_policy_grid_shape_from_config():
+    with tempfile.TemporaryDirectory() as d:
+        write_dummy_model(d, "surround", obs="grid")
+        pol = Policy(d, "hard")
+        assert pol.obs_kind == "grid" and pol.obs_shape == (6, 18, 38), (pol.obs_kind, pol.obs_shape)
+        a = pol.act(np.zeros((6, 18, 38), dtype=np.uint8))
+        assert 0 <= a < pol.num_actions
+        try:
+            pol.act(np.zeros((6, 84, 84), dtype=np.uint8))
+        except ValueError:
+            return
+        raise AssertionError("pixel-shaped obs accepted by a grid model")
+
+
+def test_policy_legacy_config_is_pixels():
+    """Configs written before the obs kind existed (no 'obs' / 'obs_shape' keys) still expect (6,84,84)."""
+    with tempfile.TemporaryDirectory() as d:
+        write_dummy_model(d, "surround")
+        cfg_path = os.path.join(d, "config.json")
+        with open(cfg_path) as f:
+            config = json.load(f)
+        del config["obs"], config["obs_shape"]
+        with open(cfg_path, "w") as f:
+            json.dump(config, f)
+        pol = Policy(d)
+        assert pol.obs_kind == "pixels" and pol.obs_shape == (6, 84, 84), (pol.obs_kind, pol.obs_shape)
+        pol.act(np.zeros((6, 84, 84), dtype=np.uint8))
+        try:
+            pol.act(np.zeros((6, 18, 38), dtype=np.uint8))
+        except ValueError:
+            return
+        raise AssertionError("grid-shaped obs accepted by a legacy pixel model")
 
 
 def test_policy_medium_and_easy_return_valid_indices():
@@ -220,6 +256,97 @@ def test_scripted_held_is_deterministic():
 
 
 # ---------- console dry run ----------
+
+class UpscaledSource:
+    """Stands in for the capture card: emulator RGB frames upscaled to 640x420 (nearest), read() like Capture."""
+
+    def __init__(self, frames: list[np.ndarray]):
+        self.frames = [cv2.resize(f, (640, 420), interpolation=cv2.INTER_NEAREST) for f in frames]
+        self.i = 0
+
+    def read(self):
+        if self.i >= len(self.frames):
+            raise EOFError
+        frame = self.frames[self.i]
+        self.i += 1
+        return frame, float(self.i)
+
+    def close(self) -> None:
+        pass
+
+
+def emulator_frames(n: int, seed: int = 3) -> list[np.ndarray]:
+    """n RGB screens of a real Surround game under random play."""
+    spec = GAMES["surround"]
+    ale = play_pc.make_ale(spec, seed)
+    rng = np.random.default_rng(seed)
+    frames = []
+    for _ in range(n):
+        ids = np.array([spec.action_ids[rng.integers(len(spec.action_ids))] for _ in range(2)], dtype=np.int32)
+        ale.act(ids)
+        frames.append(ale.getScreenRGB().copy())
+    return frames
+
+
+def test_console_grid_matches_gridstack_on_emulator_frames():
+    frames = emulator_frames(120)
+    seen: list[np.ndarray] = []
+
+    class RecordingPolicy(Policy):
+        def act(self, obs):
+            seen.append(obs.copy())
+            return super().act(obs)
+
+    with tempfile.TemporaryDirectory() as d:
+        write_dummy_model(d, "surround", obs="grid")
+        link = FakeLink()
+        args = console_play.Args(game="surround", model=d, level="hard", crop=os.path.join(d, "missing_crop.json"))
+        orig_policy = console_play.Policy
+        console_play.Policy = RecordingPolicy
+        try:
+            summary = console_play.run(args, link=link, source=UpscaledSource(frames))
+        finally:
+            console_play.Policy = orig_policy
+    frameskip = 4   # write_dummy_model
+    n_dec = len(frames) // frameskip
+    assert summary["frames"] == 120 and summary["decisions"] == n_dec == 30, summary
+    assert summary["resets"] == 1, summary                        # only the first decision resets
+    assert link.masks == summary["masks"] + [0]
+    # the obs at decision j is GridStack(seat=1) over the emulator screens of the blocks' last frames
+    ref = GridStack(seat=1)
+    want = [ref.reset(frames[frameskip - 1]) if j == 0 else ref.push(frames[frameskip * j + frameskip - 1])
+            for j in range(n_dec)]
+    assert len(seen) == n_dec and all(o.shape == (6, 18, 38) for o in seen)
+    for j, (got, exp) in enumerate(zip(seen, want)):
+        assert np.array_equal(got, exp), f"decision {j}: grid obs differs from GridStack on the emulator frame"
+
+
+def test_play_pc_grid_episode_smoke():
+    spec = GAMES["surround"]
+    with tempfile.TemporaryDirectory() as d:
+        write_dummy_model(d, "surround", obs="grid")
+        pol = Policy(d, "hard")
+        pol.rng = np.random.default_rng(0)
+        ep = play_pc.Episode(spec, 5, "grid")
+        assert ep.obs.shape == (6, 18, 38) and ep.grid
+        screens = []
+        for _ in range(300):
+            ep.step_frame(0, pol)   # human holds NOOP
+            screens.append(ep.ale.getScreenRGB().copy())
+        assert ep.frames == 300 and ep.pos == 0 and not ep.over and ep.grays == []
+        # 300 is a step boundary: the newest frame is the screen after frame 300, the older one after frame 296
+        assert np.array_equal(ep.obs[3:], grid_planes(classify_cells(screens[299]), seat=1))
+        assert np.array_equal(ep.obs[:3], grid_planes(classify_cells(screens[295]), seat=1))
+
+
+def test_play_pc_headless_grid_model():
+    with tempfile.TemporaryDirectory() as d:
+        write_dummy_model(d, "surround", obs="grid")
+        args = play_pc.Args(game="surround", model=d, level="hard", scale=2, fps=0, seed=7, max_frames=300,
+                            scripted_human=True)
+        summary = play_pc.run(args)
+        assert summary["ticks"] == 300 and summary["emulator_frames"] == 300, summary
+
 
 def test_console_dry_run_on_synthetic_video():
     with tempfile.TemporaryDirectory() as d:
