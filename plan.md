@@ -365,6 +365,11 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   so it overfits: there were only 28 training games. Played as a policy, it loses: 0–30 and 10–30 rounds vs SearchBot,
   3–30 and 4–30 vs the flood bot. The net *can* represent the contesting moves, so v4's gap is the training signal
   (no opponent contests space), not network capacity. Next: an exploiter league (§4.6). SearchBot stays held out.
+- `surround_league_v1` (`league.py`, job 50438, eval watcher 50439): main agent warm-started from `surround_v4` final
+  (30M), lr 1e-4. 5 rounds; each round first trains an exploiter (warm-started from the frozen main agent, 2M samples,
+  only games vs that frozen main agent), then trains the main agent 4M samples with 25% league games (PFSP over all
+  exploiters so far), 20% pool, 20% flood bot, 35% mirror. ~30M samples in total (~1.5× the main agent's 20M).
+  Success = wins vs the held-out SearchBot.
 - ⭐ **Candidate: `surround_v4` 12M** (`checkpoints/surround_v4/ckpt_12005376.pt`, copy kept at
   `checkpoints/candidates/surround_v4_12M.pt`). The first agent that beats a scripted bot; not exported yet.
 
