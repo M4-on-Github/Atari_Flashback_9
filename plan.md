@@ -298,6 +298,7 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
 | Agent names, action sets, modes, episode lengths, which agent is P1 | Probe (facts below the table) | Claude | ✅ |
 | Real samples/s → final training hours | A4 benchmark | Claude | ✅ |
 | Scripted Surround bot: grid parsing from pixels | `fb9/bots.py`: 38×18 grid of 4×9-px cells; flood-fill bot wins 40/40 rounds vs random | Claude | ✅ |
+| Held-out stronger Surround bot (never a training opponent, so beating it can't be gamed) | `fb9/search_bot.py`: alpha-beta over both snakes' moves, Voronoi territory eval; beats the flood-fill bot 12–0 in rounds, ~4.5 ms/move | Claude | ✅ |
 | Player colors still distinguishable in grayscale (§4.1) | Yes: Surround players gray 64 vs 147 (bg 90, walls 167); Combat mode 2 tanks 124 vs 146 (bg 102, maze 208). Grayscale kept | Claude | ✅ |
 | `combat_tank_v2` flag defaults (maze / billiard / invisible) and which mode they map to | mode = {1,8,10,13}[invisible,billiard] + has_maze. Default = 9 (Tank-Pong). We use **mode 2** | Claude | ✅ |
 | Console has two 9-pin trapezoid joystick sockets on the front ("FB9" = Atari Flashback 9) | Look at the console | **You** | ❓ |

@@ -2,7 +2,7 @@
 
 CLI: container/run.sh python fb9/evaluate.py --run <run> --game surround [--watch] [--episodes 10]
 
-Per checkpoint (oldest first): vs RandomBot, vs SurroundBot (surround only), vs the previous <=3 evaluated checkpoints
+Per checkpoint (oldest first): vs RandomBot, vs SurroundBot and SearchBot (surround only), vs the previous <=3 evaluated checkpoints
 (Elo). Every matchup plays `episodes` games, half with the agent in seat 0 and half in seat 1. Outputs:
   runs/<run>/eval/state.json  evaluated checkpoints and their results
   runs/<run>/eval/elo.json    Elo ratings per checkpoint file
@@ -32,6 +32,7 @@ from fb9.bots import RandomBot, SurroundBot  # noqa: E402
 from fb9.envs import EnvConfig, TwoPlayerGame  # noqa: E402
 from fb9.games import GAMES  # noqa: E402
 from fb9.model import Agent  # noqa: E402
+from fb9.search_bot import SearchBot  # noqa: E402
 
 ELO_START = 1000.0
 ELO_K = 32.0
@@ -55,9 +56,9 @@ class Args:
 
 @dataclass
 class Job:
-    tag: str                  # "random" | "bot" | previous checkpoint file name
+    tag: str                  # "random" | "bot" | "search" | previous checkpoint file name
     agent: Agent
-    opp_kind: str             # "random" | "bot" | "net"
+    opp_kind: str             # "random" | "bot" | "search" | "net"
     seat: int                 # the agent's seat (0 = port 1)
     opp_net: Agent | None = None
 
@@ -94,6 +95,8 @@ def _act(requests: list[tuple[Agent, np.ndarray]]) -> list[int]:
 def _make_bot(kind: str, num_actions: int, seed: int):
     if kind == "bot":
         return SurroundBot(seed)
+    if kind == "search":
+        return SearchBot(seed)
     if kind == "random":
         return RandomBot(num_actions, seed)
     return None
@@ -255,8 +258,9 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
     for i in range(args.episodes):
         jobs.append(Job("random", agent, "random", i % 2))
     if args.game == "surround":
-        for i in range(args.episodes):
-            jobs.append(Job("bot", agent, "bot", i % 2))
+        for kind in ("bot", "search"):
+            for i in range(args.episodes):
+                jobs.append(Job(kind, agent, kind, i % 2))
     for e in prev:
         for i in range(args.episodes):
             jobs.append(Job(e["file"], agent, "net", i % 2, prev_nets[e["file"]]))
@@ -280,7 +284,8 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
 
     random_s = _summary(groups.get("random", []))
     bot_s = _summary(groups["bot"]) if args.game == "surround" else None
-    entry = {"file": path.name, "samples": samples, "vs_random": random_s, "vs_bot": bot_s,
+    search_s = _summary(groups["search"]) if args.game == "surround" else None
+    entry = {"file": path.name, "samples": samples, "vs_random": random_s, "vs_bot": bot_s, "vs_search": search_s,
              "vs_prev": vs_prev, "elo": rating}
 
     writer.add_scalar("eval/winrate_vs_random", random_s["winrate"], samples)
@@ -288,6 +293,8 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
     if bot_s is not None:
         writer.add_scalar("eval/winrate_vs_bot", bot_s["winrate"], samples)
         writer.add_scalar("eval/scorediff_vs_bot", bot_s["scorediff"], samples)
+        writer.add_scalar("eval/winrate_vs_search", search_s["winrate"], samples)
+        writer.add_scalar("eval/scorediff_vs_search", search_s["scorediff"], samples)
     writer.add_scalar("eval/elo", rating, samples)
     writer.flush()
 
@@ -302,7 +309,8 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
 
     prev_txt = " ".join(f"{k}:{v['wins']}/{v['draws']}/{v['losses']}" for k, v in vs_prev.items()) or "-"
     bot_txt = (f"bot W/D/L {bot_s['wins']}/{bot_s['draws']}/{bot_s['losses']} wr {bot_s['winrate']:.2f} "
-               f"sd {bot_s['scorediff']:+.2f} | ") if bot_s else ""
+               f"sd {bot_s['scorediff']:+.2f} | search W/D/L {search_s['wins']}/{search_s['draws']}/"
+               f"{search_s['losses']} wr {search_s['winrate']:.2f} sd {search_s['scorediff']:+.2f} | ") if bot_s else ""
     print(f"eval {path.name} samples {samples} | random W/D/L {random_s['wins']}/{random_s['draws']}/"
           f"{random_s['losses']} wr {random_s['winrate']:.2f} sd {random_s['scorediff']:+.2f} | {bot_txt}"
           f"elo {rating:.0f} | prev {prev_txt} | {time.time() - t0:.0f}s", flush=True)
