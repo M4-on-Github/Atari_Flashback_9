@@ -18,7 +18,6 @@ from fb9.bots import (EMPTY, NCOLS, NROWS, OPP, OWN, S_DOWN, S_LEFT, S_RIGHT, S_
 from fb9.envs import EnvConfig, TwoPlayerGame  # noqa: E402
 import bc_probe  # noqa: E402
 
-
 def _corridor_grid(opp: tuple[int, int] | None = None) -> np.ndarray:
     """Own head at (9,10) moving right. UP leads into a closed 3-cell pocket, RIGHT into an open 8x20 block, DOWN and
     LEFT are walls. Optional opponent head."""
@@ -29,7 +28,6 @@ def _corridor_grid(opp: tuple[int, int] | None = None) -> np.ndarray:
     if opp is not None:
         g[opp] = OPP
     return g
-
 
 def test_move_scores_hand_grid():
     """Pocket vs open board, walls, the reverse of the heading, and the risk penalty next to the opponent head."""
@@ -57,7 +55,6 @@ def test_move_scores_hand_grid():
     g[9, 10] = EMPTY
     assert move_scores(g, S_RIGHT) == {}
 
-
 def test_heading_tracker_round_reset():
     """Heading follows one-cell moves, a jump clears it, and a cleared board starts a new round."""
     from fb9.bots import HeadingTracker
@@ -72,7 +69,6 @@ def test_heading_tracker_round_reset():
     g3 = np.full((NROWS, NCOLS), EMPTY, dtype=np.int8)   # new round: board cleared, head elsewhere
     g3[2, 2] = OWN
     assert t.update(g3) == (2, 2) and t.heading is None
-
 
 def _legacy_act(bot_state: dict, rgb: np.ndarray, seat: int) -> int:
     """Verbatim copy of SurroundBot.act before the move_scores refactor (the reference for the equivalence test)."""
@@ -115,7 +111,6 @@ def _legacy_act(bot_state: dict, rgb: np.ndarray, seat: int) -> int:
         return heading if heading is not None else S_UP
     return best_action
 
-
 def test_surround_bot_unchanged():
     """SurroundBot's actions match the pre-refactor logic over 300 steps of a fixed-seed game (both seats)."""
     game = TwoPlayerGame(EnvConfig("surround", train=False), seed=5)
@@ -141,7 +136,6 @@ def test_surround_bot_unchanged():
             legacy = [{"prev_head": None, "heading": None, "prev_occupied": 0} for _ in (0, 1)]
     print(f"    {n} steps x 2 seats identical to the legacy logic ({rounds} episode ends)")
 
-
 def test_collect_grid_samples():
     """Worker output: grid obs are (6,18,38) in {0,255}, own head visible in the newest frame, pixel obs (6,84,84)."""
     out = bc_probe._collect(("train", 0, 60, 3, 0.15, 0.1, 10.0))
@@ -159,7 +153,6 @@ def test_collect_grid_samples():
     assert np.isfinite(out["scores"][legal]).all()
     print(f"    {len(out['scores'])} samples from {int(out['games'])} games; grid obs OK")
 
-
 def test_keep_trivial_filter():
     """keep_trivial=1.0 keeps every candidate (nothing filtered); 0.1 gives a clearly more decisive kept set."""
     def decisive_frac(keep: float) -> tuple[float, dict]:
@@ -174,13 +167,13 @@ def test_keep_trivial_filter():
           f"({int(filtered['recorded'])} candidates for 300 kept)")
     assert d_kept > d_all + 0.2, f"filter did not raise the decisive fraction: {d_all:.3f} -> {d_kept:.3f}"
 
-
 def test_bc_probe_end_to_end():
     """Tiny run: both models, one epoch, CPU, JSON written with sane metrics."""
     import json
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "results.json"
-        args = bc_probe.Args(train_samples=600, test_samples=200, workers=2, epochs=1, cuda=False, out=str(out))
+        args = bc_probe.Args(train_samples=600, test_samples=200, workers=2, epochs=1, cuda=False, play_games=0,
+                             out=str(out))
         res = bc_probe.run(args)
         data = json.loads(out.read_text())
     assert set(data["models"]) == {"agent_pixels", "grid_agent"}, data["models"].keys()
@@ -204,6 +197,53 @@ def test_bc_probe_end_to_end():
           f"grid acc_all {data['models']['grid_agent']['epochs'][0]['test']['acc_all']:.3f}, "
           f"random legal acc_all {base['random_legal']['acc_all']:.3f}")
 
+def test_search_teacher_collection():
+    """teacher="search": -inf exactly on off-grid/occupied directions, row[0] == row[heading], flags and metadata sane."""
+    quota = 300
+    out = bc_probe._collect(("train", 0, quota, 7, 0.15, 1.0, 10.0, "search"))
+    assert len(out["scores"]) == quota
+    scores, grid, heading = out["scores"], out["grid"], out["heading"]
+    assert set(np.unique(grid).tolist()) <= {0, 255}
+    occupied = grid[:, 3] == 255            # newest frame, occupied plane (heads included)
+    own = grid[:, 4] == 255
+    for i in range(quota):
+        r, c = np.argwhere(own[i])[0]
+        h = int(heading[i])
+        assert scores[i, 0] == scores[i, h], (i, scores[i], h)
+        for a in bc_probe.DIRECTIONS:
+            nr, nc = r + bc_probe._DIR_DELTA[a][0], c + bc_probe._DIR_DELTA[a][1]
+            blocked = not (0 <= nr < NROWS and 0 <= nc < NCOLS) or occupied[i, nr, nc]
+            assert np.isneginf(scores[i, a]) == blocked, (i, a, scores[i], blocked)
+    assert out["disagree"].dtype == bool
+    n_dis = int(out["disagree"].sum())
+    assert n_dis > 0, "no disagreeing sample among 300 kept"
+    assert (out["head_dist"] >= 1).all(), out["head_dist"].min()
+    assert ((out["flood_choice"] >= 1) & (out["flood_choice"] <= 4)).all()
+    assert int(out["mismatch"]) >= 0 and int(out["searched"]) >= quota
+    print(f"    {quota} search-labelled samples: disagree {n_dis}, near {(out['head_dist'] <= 6).sum()}, "
+          f"heading mismatches {int(out['mismatch'])} of {int(out['searched'])} searched states")
+
+def test_bc_probe_search_end_to_end():
+    """teacher="search", grid only, one epoch, one play episode per seat and opponent: JSON has the new fields."""
+    import json
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "results.json"
+        args = bc_probe.Args(train_samples=300, test_samples=150, workers=2, epochs=1, cuda=False, teacher="search",
+                             models=("grid",), play_games=1, out=str(out))
+        bc_probe.run(args)
+        data = json.loads(out.read_text())
+        assert set(data["models"]) == {"grid_agent"}, data["models"].keys()
+        assert (Path(tmp) / "results_grid.pt").exists()
+    t = data["models"]["grid_agent"]["epochs"][0]["test"]
+    assert 0.0 <= t["acc_disagree"] <= 1.0 and t["n_disagree"] >= 0 and t["acc_near"] is not None, t
+    assert "flood_bot" in data["baselines"]["test"]
+    assert data["baselines"]["test"]["flood_bot"]["acc_disagree"] == 0.0
+    assert set(data["play"]) == {"vs_search", "vs_flood"}
+    for opp in data["play"].values():
+        for seat in ("seat0", "seat1"):
+            assert opp[seat]["episodes"] == 1
+    print(f"    flood_bot acc_all {data['baselines']['test']['flood_bot']['acc_all']:.3f}, "
+          f"grid acc_disagree {t['acc_disagree']}, play {data['play']}")
 
 if __name__ == "__main__":
     tests = [(name, fn) for name, fn in sorted(globals().items()) if name.startswith("test_") and callable(fn)]

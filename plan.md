@@ -359,6 +359,12 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   after the bot cuts v4 off: in every separation v4 had the smaller region (by 6–450 cells). Greedy play doesn't
   help (3/63 rounds, the same game repeated). v4 never learned to contest cutting points, because neither training
   opponent (itself, the flood bot) plays them.
+- **Search-teacher probe** (`tools/bc_probe.py --teacher search`, job 50436, `runs/bc_probe/probe_search_v1.json`):
+  the grid net imitating SearchBot reaches 85% test accuracy overall, 73% on states where the flood bot's move is not
+  SearchBot-best (the flood bot gets 0% there), and 76% with heads ≤6 cells apart (flood bot 63%). Train accuracy 99%,
+  so it overfits: there were only 28 training games. Played as a policy, it loses: 0–30 and 10–30 rounds vs SearchBot,
+  3–30 and 4–30 vs the flood bot. The net *can* represent the contesting moves, so v4's gap is the training signal
+  (no opponent contests space), not network capacity. Next: an exploiter league (§4.6). SearchBot stays held out.
 - ⭐ **Candidate: `surround_v4` 12M** (`checkpoints/surround_v4/ckpt_12005376.pt`, copy kept at
   `checkpoints/candidates/surround_v4_12M.pt`). The first agent that beats a scripted bot; not exported yet.
 

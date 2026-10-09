@@ -225,8 +225,11 @@ class SearchBot:
         self.heading = [None, None]     # last move direction of (own, opponent), None if unknown
         self.cache_key = None
         self.cache_action = None
+        self.cache_values = None
+        self.last_values = None         # {action: value} of the last search, None if act() did not search
 
     def act(self, rgb: np.ndarray, seat: int) -> int:
+        self.last_values = None
         grid = parse_grid(rgb, seat)
         occupied = int(np.count_nonzero(grid != EMPTY))
         if occupied < self.prev_occupied:   # the board was cleared: a new round
@@ -253,17 +256,19 @@ class SearchBot:
         blocked = bytearray((grid != EMPTY).ravel().astype(np.uint8).tobytes())
         key = (bytes(blocked), own_head, opp_head, own_h, opp_h)
         if key == self.cache_key:
+            self.last_values = self.cache_values
             return self.cache_action
         if opp_head is None:
             action = self._solo(blocked, own_head, own_h)
         else:
             action = self._search(blocked, own_head, opp_head, own_h, opp_h)
-        self.cache_key, self.cache_action = key, action
+        self.cache_key, self.cache_action, self.cache_values = key, action, self.last_values
         return action
 
     def _search(self, blocked, own_head, opp_head, own_h, opp_h) -> int:
         search = _Search(blocked, own_head, opp_head, own_h, opp_h)
         values = search.run(MOVES[own_h], own_h, NODE_BUDGET)
+        self.last_values = values
         best = max(values.values())
         cands = sorted(a for a, v in values.items() if v == best)
         if own_h in cands:
