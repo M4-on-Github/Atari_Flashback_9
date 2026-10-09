@@ -12,9 +12,9 @@ import torch.nn as nn
 import tyro
 from torch import Tensor
 
-from fb9.games import GAMES
+from fb9.games import GAMES, frameskip_from_args
 from fb9.model import Agent
-from fb9.preprocess import FRAMESKIP, OBS_SHAPE, STACK
+from fb9.preprocess import OBS_SHAPE, STACK
 
 
 class LogitsWrapper(nn.Module):
@@ -54,7 +54,7 @@ def export(ckpt_path: str | Path, out_dir: str | Path) -> Path:
         "ale_mode": spec.mode,
         "action_ids": list(spec.action_ids),
         "action_names": list(spec.action_names),
-        "frameskip": FRAMESKIP,
+        "frameskip": frameskip_from_args(state["args"]),
         "stack": STACK,
         "obs_shape": list(OBS_SHAPE),
         "seat_planes": "ch4=255 for seat0/port1, ch5=255 for seat1/port2",

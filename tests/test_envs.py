@@ -9,8 +9,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fb9.envs import EnvConfig, TwoPlayerGame, VecGames  # noqa: E402
-from fb9.games import GAMES  # noqa: E402
-from fb9.preprocess import FRAMESKIP, OBS_SHAPE  # noqa: E402
+from fb9.games import GAMES, LEGACY_FRAMESKIP, frameskip_from_args  # noqa: E402
+from fb9.preprocess import OBS_SHAPE  # noqa: E402
 
 
 class _RecordingALE:
@@ -100,7 +100,7 @@ def _pettingzoo_env(game: str):
 
 
 def _check_pettingzoo_equivalence(game: str, ale_seed: int, max_steps: int):
-    """Our env (train=False) vs PettingZoo stepped one frame at a time with the same action per 4 frames."""
+    """Our env (train=False) vs PettingZoo stepped one frame at a time with the same action per decision."""
     spec = GAMES[game]
     pz = _pettingzoo_env(game)
     assert list(pz.unwrapped.action_mapping) == list(spec.action_ids), "action sets differ"
@@ -119,7 +119,7 @@ def _check_pettingzoo_equivalence(game: str, ale_seed: int, max_steps: int):
         _, our_rew, our_done, info = g.step(acts)
         pz_rew = np.zeros(2, dtype=np.float32)
         pz_over, nfr, last_obs = False, 0, None
-        for _ in range(FRAMESKIP):
+        for _ in range(g.frameskip):
             last_obs, rews, _, _, _ = pz.step({"first_0": int(acts[0]), "second_0": int(acts[1])})
             nfr += 1
             pz_rew += np.array([rews["first_0"], rews["second_0"]], dtype=np.float32)
@@ -163,10 +163,10 @@ def test_delay_exact():
         g.ale = rec
         for k in range(n_steps):
             g.step(intended[k])
-        assert len(rec.acts) == FRAMESKIP * n_steps
+        assert len(rec.acts) == g.frameskip * n_steps
         for t, a in enumerate(rec.acts):
             for p in (0, 1):
-                idx = 0 if t < d[p] else intended[(t - d[p]) // FRAMESKIP, p]
+                idx = 0 if t < d[p] else intended[(t - d[p]) // g.frameskip, p]
                 assert a[p] == ids[idx], f"d={d} frame {t} player {p}: executed {a[p]}, expected {ids[idx]}"
 
 
@@ -189,8 +189,29 @@ def test_sticky_and_eval_flag():
     for a in seq:
         g.step(np.array(a))
     for t, a in enumerate(rec.acts):
-        exp = np.array([ids[seq[t // FRAMESKIP][0]], ids[seq[t // FRAMESKIP][1]]])
+        exp = np.array([ids[seq[t // g.frameskip][0]], ids[seq[t // g.frameskip][1]]])
         assert np.array_equal(a, exp), (t, a, exp)
+
+
+def test_frameskip_per_game():
+    """Surround decides every 15 frames (one cell move), Combat every 4; EnvConfig.frameskip overrides the game."""
+    for game, want in (("surround", 15), ("combat", 4)):
+        assert GAMES[game].frameskip == want, game
+        g = TwoPlayerGame(EnvConfig(game=game, train=False), seed=0)
+        g.reset(ale_seed=3)
+        assert g.frameskip == want
+        g.step(np.zeros(2, dtype=np.int64))
+        assert g.t == want, (game, g.t)
+    g = TwoPlayerGame(EnvConfig(game="surround", train=False, frameskip=4), seed=0)
+    g.reset(ale_seed=3)
+    g.step(np.zeros(2, dtype=np.int64))
+    assert g.frameskip == 4 and g.t == 4, (g.frameskip, g.t)
+
+
+def test_frameskip_from_args():
+    assert frameskip_from_args({}) == LEGACY_FRAMESKIP == 4
+    assert frameskip_from_args({"frameskip": 15}) == 15
+    assert frameskip_from_args({"frameskip": 0}) == 4
 
 
 def test_vec_workers_match_inprocess():
@@ -220,6 +241,7 @@ def test_vec_workers_match_inprocess():
 
 def test_vec_auto_reset_semantics():
     cfg = EnvConfig(game="surround", train=False)
+    frameskip = GAMES["surround"].frameskip
     vec = VecGames(cfg, num_games=2, num_workers=0, seed=21)
     try:
         vec.reset()
@@ -238,7 +260,7 @@ def test_vec_auto_reset_semantics():
                 assert dones[2 * i] and dones[2 * i + 1], "both slots of a finished game must be done"
                 assert np.array_equal(info["episode_return"], acc[2 * i:2 * i + 2]), "episode return mismatch"
                 n = steps_since_reset[i]
-                assert FRAMESKIP * (n - 1) < info["episode_frames"] <= FRAMESKIP * n, (n, info["episode_frames"])
+                assert frameskip * (n - 1) < info["episode_frames"] <= frameskip * n, (n, info["episode_frames"])
                 # returned obs is the first obs of the new episode: the reset filled all 4 stack slots
                 for s in (2 * i, 2 * i + 1):
                     assert np.array_equal(obs[s, 0], obs[s, 3]), "obs after auto-reset is not a fresh stack"
@@ -254,6 +276,7 @@ def test_vec_auto_reset_semantics():
 
 
 def test_speed():
+    frameskip = GAMES["surround"].frameskip
     for workers in (1, 2):
         vec = VecGames(EnvConfig(game="surround", train=True), num_games=4, num_workers=workers, seed=0)
         try:
@@ -267,7 +290,7 @@ def test_speed():
             dt = time.perf_counter() - t0
             game_steps = steps * vec.num_games
             print(f"  {workers} worker(s), 4 games: {steps / dt:.1f} vec-steps/s, "
-                  f"{game_steps / dt:.0f} game-steps/s, {game_steps * FRAMESKIP / dt:.0f} frames/s")
+                  f"{game_steps / dt:.0f} game-steps/s, {game_steps * frameskip / dt:.0f} frames/s")
         finally:
             vec.close()
 

@@ -92,6 +92,22 @@ def test_policy_hard_samples_from_softmax():
         assert not np.allclose(pol.logits(a), pol.logits(b))
 
 
+def test_policy_frameskip_from_config():
+    with tempfile.TemporaryDirectory() as d:
+        write_dummy_model(d, "surround")
+        cfg_path = os.path.join(d, "config.json")
+        with open(cfg_path) as f:
+            config = json.load(f)
+        config["frameskip"] = 15
+        with open(cfg_path, "w") as f:
+            json.dump(config, f)
+        assert Policy(d).frameskip == 15
+        del config["frameskip"]   # models exported before frameskip was per game
+        with open(cfg_path, "w") as f:
+            json.dump(config, f)
+        assert Policy(d).frameskip == 4
+
+
 def test_policy_medium_and_easy_return_valid_indices():
     with tempfile.TemporaryDirectory() as d:
         write_dummy_model(d, "combat")

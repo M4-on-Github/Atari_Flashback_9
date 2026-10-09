@@ -70,10 +70,9 @@ bit0 UP, bit1 DOWN, bit2 LEFT, bit3 RIGHT, bit4 FIRE (e.g. "UPLEFTFIRE" → 0b10
 
 ## 2. Preprocessing — `fb9/preprocess.py` (shared by training, PC play, console play)
 
-One agent decision every **4 emulator frames** ("a step").
+One agent decision every **`GameSpec.frameskip` emulator frames** ("a step"): **15** for Surround (one cell move), **4** for Combat. `EnvConfig.frameskip` overrides it. Old checkpoints without a recorded frameskip use 4.
 
 ```python
-FRAMESKIP = 4
 OBS_SIZE = 84
 STACK = 4
 OBS_SHAPE = (6, 84, 84)        # 4 stacked frames + 2 seat-indicator planes, uint8
@@ -87,7 +86,7 @@ class FrameStack:
 ```
 
 - `prev_gray`/`last_gray` are the full-screen grayscale frames of the **last two emulator frames of the step**
-  (frames 3 and 4 of 4). No cropping; the whole emulator screen is resized to 84×84.
+  (the last two frames of the step, i.e. frames `frameskip-1` and `frameskip`). No cropping; the whole emulator screen is resized to 84×84.
 - Obs channel order: `[oldest, ..., newest, seat0_plane, seat1_plane]`. Seat planes are all-255 for the matching seat
   and all-0 for the other (seat 0 → ch4=255, ch5=0; seat 1 → ch4=0, ch5=255).
 - The obs returned is a **new array** (callers may keep it).
@@ -110,7 +109,7 @@ class TwoPlayerGame:
     num_actions: int
     def reset(self) -> np.ndarray                      # obs (2,6,84,84) uint8: [seat0_obs, seat1_obs]
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool, dict]
-        # actions: (2,) int action *indices*; returns obs (2,6,84,84), rewards (2,) float32 summed over the 4 frames,
+        # actions: (2,) int action *indices*; returns obs (2,6,84,84), rewards (2,) float32 summed over the step's frames,
         # done (game over or max_frames reached), info. Does NOT auto-reset.
         # When done, info = {"episode_return": (2,) float32, "episode_frames": int}
     def render_rgb(self) -> np.ndarray                 # current full-screen RGB (for videos)
@@ -214,7 +213,7 @@ Outputs:
 
 `export.py --ckpt checkpoints/<run>/latest.pt --out models/<game>/` writes `model.ts` (TorchScript of a wrapper:
 uint8 `(B,6,84,84)` → logits `(B,A)` float32, CPU) and `config.json`:
-`{"game", "ale_mode", "action_ids", "action_names", "frameskip": 4, "stack": 4, "obs_shape": [6,84,84],
+`{"game", "ale_mode", "action_ids", "action_names", "frameskip": 15 (Surround) / 4 (Combat, legacy), "stack": 4, "obs_shape": [6,84,84],
 "seat_planes": "ch4=255 for seat0/port1, ch5=255 for seat1/port2", "samples", "source_ckpt"}`.
 The exported model must load with only `torch.jit.load` (no repo code).
 
@@ -236,7 +235,7 @@ Levels (all sample from the softmax; argmax is weak when several actions do the 
 `play_pc.py --game surround --model models/surround --level hard --scale 4` — pygame window at 60 fps, human is
 **seat 0 / port 1** (keyboard arrows + space = fire; gamepad if present), model is seat 1. Uses `TwoPlayerGame`
 internals or a minimal ALE loop with `fb9/preprocess.py` exactly (`train=False`). Human input is read every
-emulator frame; the model decides every 4th frame and its action is held for 4 frames. Shows score; R restarts,
+emulator frame; the model decides every `frameskip` frames (from config.json: 15 for Surround) and its action is held for them. Shows score; R restarts,
 Esc quits. Must also work headless with `SDL_VIDEODRIVER=dummy` for a smoke test.
 
 ### 5.3 `bridge/`
@@ -256,7 +255,7 @@ Esc quits. Must also work headless with `SDL_VIDEODRIVER=dummy` for a smoke test
 - `measure_lag.py`: toggles FIRE/directions via `JoystickLink` and measures frames until the screen changes →
   prints p50/p95 lag in frames.
 - `console_play.py --game surround --model models/surround --level hard --port /dev/ttyACM0 --device 0`: capture
-  → crop (crop.json) → gray → every 4th frame `process_frame(prev,last)` → `FrameStack(seat=1)` → `Policy` →
+  → crop (crop.json) → gray → every `frameskip`-th frame `process_frame(prev,last)` → `FrameStack(seat=1)` → `Policy` →
   `action_to_bitmask` → `JoystickLink.send`. Resets the stack when the frame changes drastically (new game).
   `--dry-run` uses `FakeLink` and `FileCapture`.
 - Must not import `multi_agent_ale_py` (laptop may not have it) — only `fb9/preprocess.py`, `fb9/policy.py`,

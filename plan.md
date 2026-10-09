@@ -327,6 +327,16 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   "keep going"; the entropy bonus spreads probability over them, so argmax picks a lone turn and the snake steers into
   walls. At 15M samples the argmax agent lost 1–9 to the 5M checkpoint, while sampled play won 6–2. Play levels and the
   evaluator sample (§4.9).
+- Surround control (measured): the snake moves exactly one cell every **15 frames** (a ~235-frame pause between
+  rounds); a **1-frame** press of a new direction latches the heading at any phase of the cycle; reverse presses are
+  ignored. So NOOP, the current direction and the reverse all mean "straight" and only the 2 perpendicular presses
+  turn.
+- `surround_v1` (frameskip 4) climbed in self-play Elo (1000 → 1345 from 5M to 25M) but won **0 rounds** vs the
+  flood-fill bot and the search bot. The 30M checkpoint lost 0–30 rounds vs the flood bot at T=1, 0.5, 0.25, argmax,
+  and with each action held for 4 steps. At 25M the policy put ~0.4 probability on turns every step; with ~4 decisions
+  per cell, almost every cell turned, and the snake zigzagged into its own trail after ~30 cells.
+- Fix for `surround_v2`: per-game frameskip, Surround = 15 (one decision per cell move), Combat stays 4. Legacy
+  checkpoints and models without a recorded frameskip are frameskip 4.
 
 ## 9. Risks and mitigations
 

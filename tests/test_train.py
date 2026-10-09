@@ -33,7 +33,7 @@ def fake_factory(num_actions: int = 3):
 def tiny_args(**overrides) -> Args:
     base = dict(game="surround", num_games=4, num_steps=16, total_samples=6720, lr=1e-3, pool_fraction=0.25,
                 snapshot_every=300, pool_size=5, checkpoint_every=10**9, cuda=False, seed=1,
-                num_workers=1, run_name="run")
+                num_workers=1, run_name="run", minibatch_size=32)
     base.update(overrides)
     return Args(**base)
 
@@ -169,7 +169,7 @@ def test_export_roundtrip() -> None:
 
         import json
         cfg = json.loads((out / "config.json").read_text())
-        assert cfg["game"] == "surround" and cfg["ale_mode"] == 1 and cfg["frameskip"] == 4 and cfg["stack"] == 4
+        assert cfg["game"] == "surround" and cfg["ale_mode"] == 1 and cfg["frameskip"] == 15 and cfg["stack"] == 4
         assert cfg["obs_shape"] == [6, 84, 84] and cfg["action_ids"] == [0, 2, 3, 4, 5]
         assert len(cfg["action_names"]) == 5 and cfg["samples"] == 16 * 7 * 2
 

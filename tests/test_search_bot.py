@@ -21,8 +21,9 @@ from fb9.search_bot import SearchBot  # noqa: E402
 ACTIONS = (S_UP, S_RIGHT, S_LEFT, S_DOWN)
 
 
-def _game(seed: int) -> TwoPlayerGame:
-    game = TwoPlayerGame(EnvConfig("surround", train=True, sticky_p=0.25, max_delay=0, augment=False), seed)
+def _game(seed: int, frameskip: int | None = None) -> TwoPlayerGame:
+    game = TwoPlayerGame(EnvConfig("surround", train=True, sticky_p=0.25, max_delay=0, augment=False,
+                                   frameskip=frameskip), seed)
     game.reset()
     return game
 
@@ -119,8 +120,9 @@ def test_beats_flood_fill_bot():
 
 
 def test_act_speed():
-    """Mean act() time over real frames (cache hits included), against the flood-fill bot."""
-    game = _game(51)
+    """Mean act() time over real frames (cache hits included), against the flood-fill bot. Frameskip 4: the 10 ms
+    budget assumes ~4 calls per cell move (at 15 there is one call per move, nearly all cache misses)."""
+    game = _game(51, frameskip=4)
     me, opp = SearchBot(51), SurroundBot(51)
     times = []
     done = False

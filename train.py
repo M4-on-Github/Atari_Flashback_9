@@ -16,7 +16,7 @@ import tyro
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from fb9.games import GAMES
+from fb9.games import GAMES, frameskip_from_args
 from fb9.model import Agent
 from fb9.preprocess import OBS_SHAPE
 from fb9.selfplay import SelfPlay
@@ -48,6 +48,7 @@ class Args:
     resume: bool = False
     seed: int = 1
     cuda: bool = True
+    frameskip: int = 0  # 0 = game default (GameSpec.frameskip)
 
 
 def auto_num_workers() -> int:
@@ -84,7 +85,8 @@ def make_snapshot_module(state_dict: dict, num_actions: int, device: torch.devic
 def make_game_env(args: Args, num_workers: int):
     from fb9.envs import EnvConfig, VecGames  # imported lazily: the real env needs the ALE
 
-    return VecGames(EnvConfig(game=args.game, train=True), args.num_games, num_workers, args.seed)
+    return VecGames(EnvConfig(game=args.game, train=True, frameskip=args.frameskip), args.num_games, num_workers,
+                    args.seed)
 
 
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, next_value: torch.Tensor,
@@ -124,6 +126,8 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     """
     if args.game not in GAMES:
         raise ValueError(f"unknown game {args.game!r}; choose from {sorted(GAMES)}")
+    if args.frameskip == 0:
+        args.frameskip = GAMES[args.game].frameskip   # resolved here so checkpoints record the value used
     root = Path(root) if root is not None else REPO
     run_name = args.run_name or f"{args.game}_{datetime.now():%Y%m%d_%H%M%S}"
     run_dir = root / "runs" / run_name
@@ -152,13 +156,18 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         agent.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         samples, updates = int(ckpt["samples"]), int(ckpt["updates"])
+        ckpt_frameskip = frameskip_from_args(ckpt["args"])
+        if ckpt_frameskip != args.frameskip:
+            raise ValueError(f"{latest} was trained with frameskip {ckpt_frameskip}, but args.frameskip is "
+                             f"{args.frameskip}; resume with --frameskip {ckpt_frameskip}")
         for entry in ckpt["pool"]:
             snap_state = torch.load(pool_dir / f"snap_{entry['samples']}.pt", map_location=device,
                                     weights_only=False)
             snap = selfplay.add_snapshot(int(entry["samples"]),
                                          make_snapshot_module(snap_state["model"], num_actions, device))
             snap.winrate = float(entry["winrate"])
-        print(f"resumed {run_name} at samples={samples} updates={updates} pool={len(selfplay.pool)}")
+        print(f"resumed {run_name} at samples={samples} updates={updates} pool={len(selfplay.pool)} "
+              f"frameskip={args.frameskip}")
     # Opponents are not checkpointed (envs restart on resume): pool games draw fresh opponents.
     selfplay.resample_opponents()
 

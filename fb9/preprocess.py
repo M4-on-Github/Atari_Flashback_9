@@ -2,7 +2,6 @@
 import cv2
 import numpy as np
 
-FRAMESKIP = 4
 OBS_SIZE = 84
 STACK = 4
 OBS_SHAPE = (STACK + 2, OBS_SIZE, OBS_SIZE)

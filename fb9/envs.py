@@ -1,6 +1,6 @@
 """Fast 2-player Atari environments (docs/contracts.md §3).
 
-TwoPlayerGame: one emulator, one episode at a time, one agent decision per FRAMESKIP emulator frames.
+TwoPlayerGame: one emulator, one episode at a time, one agent decision per `frameskip` emulator frames.
 VecGames: many TwoPlayerGames stepped in worker processes; observations travel through shared memory.
 """
 import ctypes
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from fb9.games import GAMES
-from fb9.preprocess import FRAMESKIP, OBS_SHAPE, OBS_SIZE, FrameStack, process_frame
+from fb9.preprocess import OBS_SHAPE, OBS_SIZE, FrameStack, process_frame
 
 MAX_SEED = 2**31 - 1
 # Workers are single-threaded: without this each one starts thread pools sized to the whole node (oversubscription).
@@ -27,6 +27,7 @@ class EnvConfig:
     sticky_p: float = 0.25
     max_delay: int = 10         # frames; per-player delay d ~ U{0..max_delay}, redrawn each episode
     augment: bool = True        # only applies when train=True
+    frameskip: int | None = None  # emulator frames per decision; None = GameSpec.frameskip
 
 
 class TwoPlayerGame:
@@ -38,6 +39,7 @@ class TwoPlayerGame:
         self.cfg = cfg
         self.spec = GAMES[cfg.game]
         self.num_actions = self.spec.num_actions
+        self.frameskip = cfg.frameskip if cfg.frameskip is not None else self.spec.frameskip
         self.rng = np.random.Generator(np.random.PCG64(seed))
         self._ids = self.spec.action_ids
         self._rom = self.spec.rom_path()
@@ -87,9 +89,9 @@ class TwoPlayerGame:
         return np.stack([self._stacks[p].reset(self._augment(p, frame)) for p in (0, 1)])
 
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool, dict]:
-        """Advance FRAMESKIP emulator frames with the given action indices (2,).
+        """Advance self.frameskip emulator frames with the given action indices (2,).
 
-        The screen is read only for frames 3 and 4 of the step. If the game ends before frame 3, the screen of the
+        The screen is read only for the last two frames of the step. If the game ends before those, the screen of the
         last executed frame is used as both prev and last.
 
         Returns obs (2,6,84,84), rewards (2,) float32 summed over the executed frames, done, info.
@@ -100,13 +102,13 @@ class TwoPlayerGame:
         acts = (int(actions[0]), int(actions[1]))
         ids, L, ale_acts = self._ids, self._L, self._ale_acts
         max_frames = self.spec.max_frames
-        u = self.rng.random((FRAMESKIP, 2)).tolist() if self._sticky_on else None
+        u = self.rng.random((self.frameskip, 2)).tolist() if self._sticky_on else None
         sticky_p = self.cfg.sticky_p
 
         rewards = np.zeros(2, dtype=np.float32)
         last = prev = None
         done = False
-        for k in range(FRAMESKIP):
+        for k in range(self.frameskip):
             t = self.t
             for p in (0, 1):
                 hist = self._hist[p]
@@ -121,7 +123,7 @@ class TwoPlayerGame:
             ended = self.ale.game_over() or self.t >= max_frames
             # screens are only needed for the last two frames of a step (or the current one if the game ends
             # earlier in the step, in which case prev = last = the current screen)
-            if k >= FRAMESKIP - 2 or ended:
+            if k >= self.frameskip - 2 or ended:
                 prev, last = last, self.ale.getScreenGrayscale()
             if ended:
                 done = True

@@ -27,6 +27,7 @@ class Policy:
         self.config = json.loads((model_dir / "config.json").read_text())
         self.action_names: tuple[str, ...] = tuple(self.config["action_names"])
         self.num_actions = len(self.action_names)
+        self.frameskip: int = int(self.config.get("frameskip", 4))  # emulator frames per decision (old configs: 4)
         self.model = torch.jit.load(str(model_dir / "model.ts"), map_location="cpu").eval()
         self.rng = np.random.default_rng()  # tests may replace this for reproducibility
 

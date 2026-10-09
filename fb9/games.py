@@ -15,6 +15,7 @@ class GameSpec:
     mode: int
     action_ids: tuple[int, ...]
     max_frames: int = 108_000
+    frameskip: int = 4   # emulator frames per agent decision (Surround: 15 = one cell move)
 
     @property
     def action_names(self) -> tuple[str, ...]:
@@ -30,9 +31,16 @@ class GameSpec:
 
 
 GAMES: dict[str, GameSpec] = {
-    "surround": GameSpec("surround", "surround", mode=1, action_ids=(0, 2, 3, 4, 5)),
+    "surround": GameSpec("surround", "surround", mode=1, action_ids=(0, 2, 3, 4, 5), frameskip=15),
     "combat": GameSpec("combat", "combat", mode=2, action_ids=tuple(range(18))),
 }
+
+LEGACY_FRAMESKIP = 4   # checkpoints saved before frameskip was per game have no "frameskip" in their args
+
+
+def frameskip_from_args(args: dict) -> int:
+    """Frameskip recorded in a checkpoint's (or config's) args; old checkpoints without the field use 4."""
+    return args.get("frameskip") or LEGACY_FRAMESKIP
 
 _BITS = {"UP": 1, "DOWN": 2, "LEFT": 4, "RIGHT": 8, "FIRE": 16}
 

@@ -1,7 +1,7 @@
 """Play Atari Flashback 9 games against a trained model on the PC emulator (docs/contracts.md §5.2).
 
 Human = seat 0 / joystick port 1 (keyboard arrows + space, or a gamepad). Model = seat 1 / port 2.
-The model decides every 4th emulator frame; its action is held for the 4 frames. Human input is read every frame.
+The model decides every `frameskip` emulator frames (from the model's config.json); its action is held for them. Human input is read every frame.
 
     container/run.sh python play_pc.py --game surround --model models/surround --level hard --scale 4
 
@@ -23,7 +23,7 @@ import tyro  # noqa: E402
 
 from fb9.games import GAMES, GameSpec  # noqa: E402
 from fb9.policy import Policy  # noqa: E402
-from fb9.preprocess import FRAMESKIP, FrameStack, process_frame  # noqa: E402
+from fb9.preprocess import FrameStack, process_frame  # noqa: E402
 
 HUD_H = 28
 DIRS = ("UP", "DOWN", "LEFT", "RIGHT")
@@ -128,7 +128,7 @@ class Episode:
         self.stack = FrameStack(seat=1)
         self.obs = self.stack.reset(process_frame(g, g))  # first decision sees the reset screen
         self.model_idx = 0
-        self.pos = 0            # emulator frame index within the current 4-frame step
+        self.pos = 0            # emulator frame index within the current step (policy.frameskip frames)
         self.grays: list[np.ndarray] = []
         self.score = np.zeros(2, dtype=np.float32)
         self.frames = 0
@@ -147,9 +147,9 @@ class Episode:
         self.frames += 1
         self.grays.append(gray_of(self.ale))
         self.pos += 1
-        if self.pos == FRAMESKIP:
+        if self.pos == policy.frameskip:
             # max-pool the last two frames of the step, then push into the model's stack
-            self.obs = self.stack.push(process_frame(self.grays[2], self.grays[3]))
+            self.obs = self.stack.push(process_frame(self.grays[-2], self.grays[-1]))
             self.grays = []
             self.pos = 0
 

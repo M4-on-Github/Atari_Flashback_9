@@ -30,7 +30,7 @@ from torch.utils.tensorboard import SummaryWriter  # noqa: E402
 
 from fb9.bots import RandomBot, SurroundBot  # noqa: E402
 from fb9.envs import EnvConfig, TwoPlayerGame  # noqa: E402
-from fb9.games import GAMES  # noqa: E402
+from fb9.games import GAMES, frameskip_from_args  # noqa: E402
 from fb9.model import Agent  # noqa: E402
 from fb9.search_bot import SearchBot  # noqa: E402
 
@@ -38,7 +38,6 @@ ELO_START = 1000.0
 ELO_K = 32.0
 ELO_OPPONENTS = 3
 POLL_SECONDS = 60
-VIDEO_FPS = 15
 VIDEO_SCALE = 3
 EVAL_ENV = dict(train=True, sticky_p=0.25, max_delay=0, augment=False)
 CHECKPOINT_RE = re.compile(r"^ckpt_(\d+)\.pt$")
@@ -111,11 +110,12 @@ class _Slot:
     ret: np.ndarray
 
 
-def _run_jobs(jobs: list[Job], game_name: str, concurrency: int, max_steps: int | None, seed: int) -> list[Episode]:
+def _run_jobs(jobs: list[Job], game_name: str, frameskip: int, concurrency: int, max_steps: int | None,
+              seed: int) -> list[Episode]:
     """Play every job to the end of its episode (or max_steps agent steps), up to `concurrency` games at once."""
     if not jobs:
         return []
-    cfg = EnvConfig(game=game_name, **EVAL_ENV)
+    cfg = EnvConfig(game=game_name, frameskip=frameskip, **EVAL_ENV)
     num_actions = GAMES[game_name].num_actions
     games = [TwoPlayerGame(cfg, seed + s) for s in range(min(concurrency, len(jobs)))]
     results: list[Episode | None] = [None] * len(jobs)
@@ -176,25 +176,28 @@ def _elo_update(rating: float, opp_rating: float, score: float) -> float:
     return rating + ELO_K * (score - expected)
 
 
-def _load_agent(path: Path, num_actions: int) -> Agent:
+def _load_agent(path: Path, num_actions: int) -> tuple[Agent, int]:
+    """Agent and the emulator frameskip it was trained with."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     agent = Agent(num_actions)
     agent.load_state_dict(ckpt["model"])
     agent.eval()
-    return agent
+    return agent, frameskip_from_args(ckpt["args"])
 
 
 def _write_video(path: Path, game_name: str, agent: Agent, opp_kind: str, opp_net: Agent | None,
-                 max_steps: int | None, seed: int) -> None:
-    """One episode, agent in seat 0, one frame per agent step, upscaled nearest-neighbour."""
-    cfg = EnvConfig(game=game_name, **EVAL_ENV)
+                 max_steps: int | None, seed: int, frameskip: int) -> None:
+    """One episode, agent in seat 0, one frame per agent step, upscaled nearest-neighbour. The fps makes playback
+    run at about real time (60 emulator frames per second)."""
+    cfg = EnvConfig(game=game_name, frameskip=frameskip, **EVAL_ENV)
     num_actions = GAMES[game_name].num_actions
     game = TwoPlayerGame(cfg, seed)
     obs = game.reset()
     bot = _make_bot(opp_kind, num_actions, seed)
     path.parent.mkdir(parents=True, exist_ok=True)
     h, w = game.render_rgb().shape[:2]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), VIDEO_FPS, (w * VIDEO_SCALE, h * VIDEO_SCALE))
+    fps = max(1, round(60 / frameskip))
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w * VIDEO_SCALE, h * VIDEO_SCALE))
     if not writer.isOpened():
         raise RuntimeError(f"cannot open video writer for {path}")
     steps, done = 0, False
@@ -249,10 +252,16 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
     t0 = time.time()
     num_actions = GAMES[args.game].num_actions
     samples = int(CHECKPOINT_RE.match(path.name).group(1))
-    agent = _load_agent(path, num_actions)
+    agent, frameskip = _load_agent(path, num_actions)
 
     prev = [e for e in state["evaluated"] if (ckpt_dir / e["file"]).exists()][-ELO_OPPONENTS:]
-    prev_nets = {e["file"]: _load_agent(ckpt_dir / e["file"], num_actions) for e in prev}
+    loaded = {e["file"]: _load_agent(ckpt_dir / e["file"], num_actions) for e in prev}
+    for e in list(prev):
+        if loaded[e["file"]][1] != frameskip:
+            print(f"skip opponent {e['file']}: frameskip {loaded[e['file']][1]} != {frameskip} of {path.name}",
+                  flush=True)
+            prev.remove(e)
+    prev_nets = {e["file"]: loaded[e["file"]][0] for e in prev}
 
     jobs: list[Job] = []
     for i in range(args.episodes):
@@ -264,7 +273,7 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
     for e in prev:
         for i in range(args.episodes):
             jobs.append(Job(e["file"], agent, "net", i % 2, prev_nets[e["file"]]))
-    episodes = _run_jobs(jobs, args.game, args.concurrency, max_steps, args.seed)
+    episodes = _run_jobs(jobs, args.game, frameskip, args.concurrency, max_steps, args.seed)
     groups: dict[str, list[Episode]] = {}
     for ep in episodes:
         groups.setdefault(ep.tag, []).append(ep)
@@ -305,7 +314,8 @@ def _evaluate_checkpoint(args: Args, ckpt_dir: Path, videos_dir: Path, path: Pat
         video_opp = ("net", prev_nets[prev[-1]["file"]])
     else:
         video_opp = ("random", None)
-    _write_video(videos_dir / f"{samples}.mp4", args.game, agent, video_opp[0], video_opp[1], max_steps, args.seed)
+    _write_video(videos_dir / f"{samples}.mp4", args.game, agent, video_opp[0], video_opp[1], max_steps, args.seed,
+                 frameskip)
 
     prev_txt = " ".join(f"{k}:{v['wins']}/{v['draws']}/{v['losses']}" for k, v in vs_prev.items()) or "-"
     bot_txt = (f"bot W/D/L {bot_s['wins']}/{bot_s['draws']}/{bot_s['losses']} wr {bot_s['winrate']:.2f} "
