@@ -1,0 +1,5 @@
+container/*.sif
+.apptainer/
+runs/
+checkpoints/
+__pycache__/

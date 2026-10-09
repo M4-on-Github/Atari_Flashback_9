@@ -1,0 +1,20 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    # compilers: multi-agent-ale-py ships no wheels for Python >3.9, so it builds from source
+    apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 libsdl2-2.0-0 build-essential cmake zlib1g-dev && rm -rf /var/lib/apt/lists/*
+    pip install --no-cache-dir \
+        "pettingzoo[atari]==1.24.3" "supersuit==3.9.3" "gymnasium[atari]==0.29.1" \
+        "autorom[accept-rom-license]" opencv-python-headless pygame tensorboard pyserial tyro
+    # installs ROMs into AutoROM's package dir, where PettingZoo's multi-agent ALE looks for them
+    AutoROM --accept-license
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export SDL_VIDEODRIVER=${SDL_VIDEODRIVER:-dummy}
+
+%labels
+    Project Atari_Flashback_9
