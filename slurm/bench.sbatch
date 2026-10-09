@@ -13,8 +13,9 @@ set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 GAME="${1:-surround}"
 echo "job $SLURM_JOB_ID on $(hostname), cpus=$SLURM_CPUS_PER_TASK"
-container/run.sh python scripts/bench_env.py --game "$GAME" --workers 8 16 32 46
+container/run.sh python scripts/bench_env.py --game "$GAME" --workers 8 16 32 46 --games-per-worker 2
+container/run.sh python scripts/bench_env.py --game "$GAME" --workers 16 46 --games-per-worker 4
 for W in 16 30 46; do
-  container/run.sh python train.py --game "$GAME" --num-workers $W --num-games $(( W * 2 > 64 ? W * 2 : 64 )) \
+  container/run.sh python train.py --game "$GAME" --num-workers $W --num-games $(( W * 3 > 64 ? W * 3 : 64 )) \
     --total-samples 3000000 --run-name "bench_${GAME}_w${W}" 2>&1 | tail -5
 done

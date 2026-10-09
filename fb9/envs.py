@@ -5,6 +5,7 @@ VecGames: many TwoPlayerGames stepped in worker processes; observations travel t
 """
 import ctypes
 import multiprocessing as mp
+import os
 import traceback
 from dataclasses import dataclass
 
@@ -14,6 +15,8 @@ from fb9.games import GAMES
 from fb9.preprocess import FRAMESKIP, OBS_SHAPE, OBS_SIZE, FrameStack, process_frame
 
 MAX_SEED = 2**31 - 1
+# Workers are single-threaded: without this each one starts thread pools sized to the whole node (oversubscription).
+_SINGLE_THREAD_ENV = {k: "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}
 NOISE_BANK = 32   # per-episode, per-player noise bank size (frames draw one entry each)
 
 
@@ -196,6 +199,8 @@ class _GameBank:
 
 def _worker_main(conn, raw, shape: tuple, cfg: EnvConfig, game_ids: list[int], seed: int) -> None:
     try:
+        import cv2
+        cv2.setNumThreads(1)
         obs = np.frombuffer(raw, dtype=np.uint8).reshape(shape)
         bank = _GameBank(cfg, game_ids, seed, obs)
         while True:
@@ -237,6 +242,8 @@ class VecGames:
             ctx = mp.get_context("spawn")
             self._raw = ctx.RawArray(ctypes.c_uint8, int(np.prod(shape)))
             self._obs = np.frombuffer(self._raw, dtype=np.uint8).reshape(shape)
+            saved_env = {k: os.environ.get(k) for k in _SINGLE_THREAD_ENV}
+            os.environ.update(_SINGLE_THREAD_ENV)   # inherited by the spawned workers
             for ids in np.array_split(np.arange(num_games), num_workers):
                 ids = [int(i) for i in ids]
                 slots = np.array([s for i in ids for s in (2 * i, 2 * i + 1)], dtype=np.int64)
@@ -246,6 +253,11 @@ class VecGames:
                 proc.start()
                 child_conn.close()
                 self._workers.append((proc, parent_conn, slots))
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def _recv(self, conn):
         status, payload = conn.recv()
