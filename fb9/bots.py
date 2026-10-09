@@ -57,11 +57,10 @@ def parse_grid(rgb: np.ndarray, seat: int) -> np.ndarray:
     return grid
 
 
-class SurroundBot:
-    """Flood-fill Surround player. Stateful only for heading and round restarts."""
+class HeadingTracker:
+    """Own head and heading of one seat, read from successive grids. A cleared board starts a new round."""
 
-    def __init__(self, seed: int = 0):
-        self.rng = np.random.default_rng(seed)   # only used to break exact ties
+    def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
@@ -69,19 +68,17 @@ class SurroundBot:
         self.heading: int | None = None
         self.prev_occupied = 0
 
-    def act(self, rgb: np.ndarray, seat: int) -> int:
-        grid = parse_grid(rgb, seat)
+    def update(self, grid: np.ndarray) -> tuple[int, int] | None:
+        """Feed the grid of the current step. Returns the own head cell, or None if it is not visible."""
         occupied = int(np.count_nonzero(grid != EMPTY))
-        own = np.argwhere(grid == OWN)
-        opp = np.argwhere(grid == OPP)
-
         # new round: the board was cleared (trails only grow within a round)
         if occupied < self.prev_occupied:
             self.reset()
         self.prev_occupied = occupied
 
-        if len(own) != 1:   # head not visible (crashed, or between rounds): keep going straight if we can
-            return self.heading if self.heading is not None else S_UP
+        own = np.argwhere(grid == OWN)
+        if len(own) != 1:
+            return None
         head = (int(own[0][0]), int(own[0][1]))
         if self.prev_head is not None and head != self.prev_head:
             dr, dc = head[0] - self.prev_head[0], head[1] - self.prev_head[1]
@@ -90,24 +87,69 @@ class SurroundBot:
             else:   # jumped: the board was reset under us
                 self.heading = None
         self.prev_head = head
+        return head
 
-        opp_head = (int(opp[0][0]), int(opp[0][1])) if len(opp) == 1 else None
-        blocked = grid != EMPTY
-        blocked[head] = True
-        best_action, best_score = None, None
-        for action, (dr, dc) in _DIR_DELTA.items():
-            if self.heading is not None and action == _OPPOSITE[self.heading]:
-                continue   # never reverse into the neck
-            nxt = (head[0] + dr, head[1] + dc)
-            if not (0 <= nxt[0] < NROWS and 0 <= nxt[1] < NCOLS) or blocked[nxt]:
-                continue
+
+def move_scores(grid: np.ndarray, heading: int | None) -> dict[int, float]:
+    """Primary score of each direction action on a grid: reachable area, minus RISK_PENALTY next to the opponent head.
+
+    Reverse of the heading, off-board and blocked moves score -inf. Empty dict if the own head is not visible.
+    """
+    own = np.argwhere(grid == OWN)
+    if len(own) != 1:
+        return {}
+    head = (int(own[0][0]), int(own[0][1]))
+    opp = np.argwhere(grid == OPP)
+    opp_head = (int(opp[0][0]), int(opp[0][1])) if len(opp) == 1 else None
+    blocked = grid != EMPTY
+    blocked[head] = True
+    scores: dict[int, float] = {}
+    for action, (dr, dc) in _DIR_DELTA.items():
+        nxt = (head[0] + dr, head[1] + dc)
+        if heading is not None and action == _OPPOSITE[heading]:
+            scores[action] = -np.inf   # never reverse into the neck
+        elif not (0 <= nxt[0] < NROWS and 0 <= nxt[1] < NCOLS) or blocked[nxt]:
+            scores[action] = -np.inf
+        else:
             area = _reachable_area(blocked, nxt)
             risky = opp_head is not None and max(abs(nxt[0] - opp_head[0]), abs(nxt[1] - opp_head[1])) <= 1
-            score = (area - (RISK_PENALTY if risky else 0), action == self.heading)
-            if best_score is None or score > best_score:
-                best_action, best_score = action, score
+            scores[action] = float(area - (RISK_PENALTY if risky else 0))
+    return scores
+
+
+def choose_move(scores: dict[int, float], heading: int | None) -> int | None:
+    """The bot's pick from move_scores: max of (score, action == heading), first in _DIR_DELTA order on ties.
+
+    None if there is no legal move.
+    """
+    best_action, best_key = None, None
+    for action, score in scores.items():
+        if score == -np.inf:   # illegal
+            continue
+        key = (score, action == heading)
+        if best_key is None or key > best_key:
+            best_action, best_key = action, key
+    return best_action
+
+
+class SurroundBot:
+    """Flood-fill Surround player. Stateful only for heading and round restarts."""
+
+    def __init__(self, seed: int = 0):
+        self.rng = np.random.default_rng(seed)   # only used to break exact ties
+        self.reset()
+
+    def reset(self) -> None:
+        self.tracker = HeadingTracker()
+
+    def act(self, rgb: np.ndarray, seat: int) -> int:
+        grid = parse_grid(rgb, seat)
+        if self.tracker.update(grid) is None:   # head not visible (crashed, or between rounds): keep going straight
+            return self.tracker.heading if self.tracker.heading is not None else S_UP
+        heading = self.tracker.heading
+        best_action = choose_move(move_scores(grid, heading), heading)
         if best_action is None:   # boxed in: any action (we are lost anyway)
-            return self.heading if self.heading is not None else S_UP
+            return heading if heading is not None else S_UP
         return best_action
 
 
