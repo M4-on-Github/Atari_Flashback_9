@@ -34,7 +34,7 @@ class Args:
     num_steps: int = 128
     lr: float = 2.5e-4
     update_epochs: int = 4
-    num_minibatches: int = 4
+    minibatch_size: int = 2048  # fixed size, so gradient steps scale with the batch (~1 step per 512 samples)
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.1
@@ -168,6 +168,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
     Lc = selfplay.num_learner_slots
     batch_size = Lc * T
     num_updates_total = max(1, math.ceil(args.total_samples / batch_size))
+    num_minibatches = max(1, round(batch_size / args.minibatch_size))
     snap_bucket = samples // args.snapshot_every
     ckpt_bucket = samples // args.checkpoint_every
 
@@ -221,6 +222,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         advantages, returns = compute_gae(rew_buf, val_buf, done_buf, next_value, args.gamma, args.gae_lambda)
 
         # ---- PPO update ----
+        t_update = time.time()
         b_obs = obs_buf.reshape((-1,) + OBS_SHAPE)
         b_act = act_buf.reshape(-1)
         b_logp = logp_buf.reshape(-1)
@@ -230,7 +232,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         stats: dict[str, list[float]] = {k: [] for k in ("pg", "v", "ent", "kl", "clipfrac")}
         for _ in range(args.update_epochs):
             perm = torch.randperm(batch_size, device=device)
-            for mb in torch.tensor_split(perm, args.num_minibatches):
+            for mb in torch.tensor_split(perm, num_minibatches):
                 _, newlogp, entropy, newval = agent.get_action_and_value(b_obs[mb], b_act[mb])
                 logratio = newlogp - b_logp[mb]
                 ratio = logratio.exp()
@@ -256,6 +258,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
 
         samples += batch_size
         updates += 1
+        t_rollout, t_update = t_update - t0, time.time() - t_update
         elapsed = time.time() - t0
         sps = 2 * N * T / max(elapsed, 1e-9)
         mean = {k: float(np.mean(v)) for k, v in stats.items()}
@@ -267,6 +270,8 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
             recent.extend(ep_returns)
             writer.add_scalar("charts/episode_return", float(np.mean(ep_returns)), samples)
         writer.add_scalar("charts/sps", sps, samples)
+        writer.add_scalar("charts/rollout_seconds", t_rollout, samples)
+        writer.add_scalar("charts/update_seconds", t_update, samples)
         writer.add_scalar("losses/policy_loss", mean["pg"], samples)
         writer.add_scalar("losses/value_loss", mean["v"], samples)
         writer.add_scalar("losses/entropy", mean["ent"], samples)
@@ -281,7 +286,7 @@ def train(args: Args, env_factory: Callable[[Args, int], Any] | None = None, roo
         recent_mean = float(np.mean(recent)) if recent else float("nan")
         print(f"upd {updates} samples {samples} sps {sps:.0f} ret50 {recent_mean:.2f} pool {len(selfplay.pool)} "
               f"wr {ps.get('winrate_mean', float('nan')):.2f} pg {mean['pg']:.3f} v {mean['v']:.3f} "
-              f"ent {mean['ent']:.3f} kl {mean['kl']:.4f} ev {ev:.2f} elapsed {time.time() - start:.0f}s",
+              f"ent {mean['ent']:.3f} kl {mean['kl']:.4f} ev {ev:.2f} t {t_rollout:.1f}+{t_update:.1f}s elapsed {time.time() - start:.0f}s",
               flush=True)
 
         # ---- snapshots and checkpoints (snapshot first so the saved pool list includes it) ----

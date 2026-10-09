@@ -132,10 +132,16 @@ The games' own zero-sum scores, with no shaping to start:
 
 ### 4.7 Budget and stopping
 
-| Game | Target samples | Estimated wall time (≈30 CPUs) | Status |
+| Game | Target samples | Measured wall time (30 CPUs, 1× 1080 Ti) | Status |
 |---|---|---|---|
-| Surround | ~50M | ~3–6 h | ⏳ confirm with benchmark |
-| Combat Tank | ~150M | ~10–20 h | ⏳ confirm with benchmark |
+| Surround | ~50M | ~2.2 h (6.2k learner samples/s) | ⏳ running: `surround_v1` |
+| Combat Tank | ~150M | ~7–9 h (Combat steps are a bit slower) | ⏳ |
+
+A4 benchmark (job 50394): the env alone reaches 20k samples/s with 46 workers × 4 games, and scales poorly
+(lock-step), but training is GPU-bound: 16, 30 and 46 workers all train at ~5k samples/s. More CPUs do not help.
+Each update spends ~2.5 s in the rollout and ~2.1 s in the PPO update (128 games × 128 steps).
+PPO uses a fixed minibatch of 2048 (not a fixed count of 4): with 4 minibatches of ~7k, KL stayed ~0.0000 and
+the policy barely moved per sample.
 
 **Stop when all four hold:**
 1. ≥ 98% wins vs random.
@@ -184,7 +190,7 @@ The bottleneck is the **Atari emulator on CPU** (plus Python overhead per frame)
 | A1 | Container + smoke test | `container/fb9.sif`, probe report | Both envs step and render in 2P; torch sees the 1080 Ti | ✅ |
 | A2 | Env harness | `fb9/envs.py` (pipeline §4.1), `fb9/wrappers.py` | Obs shapes correct; delay and augmentation visually checked | ⏳ |
 | A3 | Trainer + eval | `train.py`, `fb9/selfplay.py`, `fb9/evaluate.py`, `fb9/bots.py` | 10-min run on the interactive node shows learning vs random; a resume-from-checkpoint test passes | ⏳ |
-| A4 | Speed benchmark | `slurm/bench.sbatch` → samples/s at 16/32/48 CPUs | Real hour estimates written into §4.7 | ⏳ |
+| A4 | Speed benchmark | `slurm/bench.sbatch` → samples/s at 16/32/48 CPUs | Real hour estimates written into §4.7 | ✅ |
 | A5 | Train Surround | `slurm/train.sbatch surround` | Stop criteria in §4.7 | ⏳ |
 | A6 | Train Combat Tank | `slurm/train.sbatch combat_tank` | Stop criteria in §4.7 | ⏳ |
 | A7 | Export | `export.py` → `models/<game>/{model.ts, config.json}` | Loads and runs on CPU without the repo's training code | ⏳ |
@@ -290,7 +296,7 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
 | Container builds and the multi-agent ALE works inside it | `multi-agent-ale-py` built from source (wheels only exist for Python ≤ 3.9). `fb9.sif` 3.4 GB | Claude | ✅ |
 | PyTorch 2.5.1 runs on the 1080 Ti (sm_61) | Probe: CUDA available, conv test passes | Claude | ✅ |
 | Agent names, action sets, modes, episode lengths, which agent is P1 | Probe (facts below the table) | Claude | ✅ |
-| Real samples/s → final training hours | A4 benchmark | Claude | ⏳ |
+| Real samples/s → final training hours | A4 benchmark | Claude | ✅ |
 | Scripted Surround bot: grid parsing from pixels | A3 | Claude | ⏳ |
 | Player colors still distinguishable in grayscale (§4.1) | Yes: Surround players gray 64 vs 147 (bg 90, walls 167); Combat mode 2 tanks 124 vs 146 (bg 102, maze 208). Grayscale kept | Claude | ✅ |
 | `combat_tank_v2` flag defaults (maze / billiard / invisible) and which mode they map to | mode = {1,8,10,13}[invisible,billiard] + has_maze. Default = 9 (Tank-Pong). We use **mode 2** | Claude | ✅ |

@@ -182,7 +182,7 @@ class Agent(nn.Module):              # Nature CNN, orthogonal init (CleanRL ppo_
 
 Args (defaults): `game="surround"`, `run_name=None` (default `f"{game}_{timestamp}"`), `total_samples=50_000_000`,
 `num_games=64`, `num_workers=0→auto (os.cpu_count()-2)`, `num_steps=128`, `lr=2.5e-4` (linear anneal),
-`update_epochs=4`, `num_minibatches=4`, `gamma=0.99`, `gae_lambda=0.95`, `clip_coef=0.1`, `ent_coef=0.01`,
+`update_epochs=4`, `minibatch_size=2048` (minibatch count = round(batch/2048)), `gamma=0.99`, `gae_lambda=0.95`, `clip_coef=0.1`, `ent_coef=0.01`,
 `vf_coef=0.5`, `max_grad_norm=0.5`, `pool_fraction=0.25`, `snapshot_every=2_000_000`, `pool_size=20`,
 `checkpoint_every=5_000_000`, `resume=False`, `seed=1`, `cuda=True`.
 
