@@ -337,6 +337,13 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   per cell, almost every cell turned, and the snake zigzagged into its own trail after ~30 cells.
 - Fix for `surround_v2`: per-game frameskip, Surround = 15 (one decision per cell move), Combat stays 4. Legacy
   checkpoints and models without a recorded frameskip are frameskip 4.
+- `surround_v2` (frameskip 15, ent_coef 0.005, 128 games × 64 steps, 20M samples, ~2 h at ~3.3k samples/s, entropy
+  1.6 → 0.46): the zigzag is gone (long straight runs), self-play Elo 1000 → 2259, the learner beat its pool snapshots
+  99% of the time, but it still lost every game to both bots: ~1 round per game vs the flood bot, ~0 vs the search
+  bot. Its losses come from driving into regions it closed off itself (dead-end corridors, its own boxes). Self-play
+  converged on a narrow style.
+- `surround_v3` = v2 + `--bot-fraction 0.25` (a quarter of the games vs the flood-fill SurroundBot, played inside the
+  env workers), 30M samples. SearchBot stays held out for evaluation only.
 
 ## 9. Risks and mitigations
 
