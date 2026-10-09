@@ -3,3 +3,4 @@ container/*.sif
 runs/
 checkpoints/
 __pycache__/
+slurm/logs/

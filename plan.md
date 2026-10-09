@@ -127,7 +127,8 @@ The games' own zero-sum scores, with no shaping to start:
   strategy cycling and forgetting.
 - **Snapshot pool:** a snapshot every 2M samples; keep the last 20; sample opponents biased toward the ones the
   learner beats least often.
-- **Seats:** the learner's seat is randomized each episode, so one model can play either port.
+- **Seats:** mirror games train both seats; pool games alternate the learner's seat by game index (half seat 0, half
+  seat 1). One model therefore plays either port, with the seat-indicator planes telling it which one.
 
 ### 4.7 Budget and stopping
 
@@ -272,7 +273,11 @@ Fallback at every stage: `play_pc.py` works even if the console bridge doesn't.
 plan.md
 container/fb9.def            # apptainer recipe (fb9.sif is gitignored)
 slurm/                       # bench.sbatch, train.sbatch
-fb9/                         # envs.py, wrappers.py, model.py, selfplay.py, evaluate.py, bots.py
+docs/contracts.md            # interface contracts the coding agents build against
+docs/screenshots/            # emulator game modes, for matching on the FB9 (B4)
+fb9/                         # games.py, preprocess.py, envs.py, model.py, selfplay.py, policy.py, evaluate.py, bots.py
+scripts/                     # bench_env.py
+tests/                       # plain-script tests: container/run.sh python tests/test_<x>.py
 train.py  export.py  play_pc.py  requirements-local.txt
 bridge/                      # arduino/joystick.ino, keyboard_to_console.py, measure_lag.py, calibrate.py, console_play.py
 runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
@@ -296,6 +301,7 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
 | FB9 game numbers matching the trained modes | B4, using `docs/screenshots/` | You + Claude | ❓ |
 | End-to-end console lag (training already covers 0–10 frames) | B3 | You + Claude | ⏳ after parts arrive |
 | FB9 emulation close enough to Stella's | B5 calibration + playtest | You + Claude | ⏳ |
+| Combat colors differ (emulator PAL ROM vs console NTSC) | B5 calibration maps each console color (background, maze, tank 1, tank 2) to the emulator's gray level; brightness/contrast augmentation covers the rest | Claude | ⏳ |
 
 **A1 probe facts** (used by the code):
 
@@ -303,7 +309,8 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   snake (score shown top right); `second_0` is green/left. Combat: `first_0` is the **left** tank.
 - Surround: 5 actions, ALE ids `[0 NOOP, 2 UP, 3 RIGHT, 4 LEFT, 5 DOWN]`, 2P modes `[1,5..12]`, we use mode 1. Random-play
   games last ~5,700 frames (~1.6 min) with ~12 rounds; rewards ±1 per round, zero-sum. Screen 210×160.
-- Combat: full 18-action set, 27 modes, screen **256×160** (taller than Surround). Fixed 8,181-frame games (2:16 timer);
+- Combat: the ALE ships the **PAL** cartridge (`Combat (32-in-1) (Atari) (PAL)`), while the FB9 runs NTSC. Same game
+  logic, but different colors and a taller screen. Full 18-action set, 27 modes, screen **256×160**. Fixed 8,181-frame games (2:16 timer);
   ±1 per hit, zero-sum. Colors differ per mode (mode 2: olive background, blue/pink tanks).
 - Speed: ~3,000–3,300 raw frames/s per core through PettingZoo.
 

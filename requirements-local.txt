@@ -1,0 +1,17 @@
+# Laptop (play machine) requirements: play_pc.py and the console bridge (bridge/).
+# Versions match the container where we know them. Use Python 3.9 or 3.11 on the laptop.
+#
+# torch: install the CPU build (inference is ~1 ms per step on CPU), e.g.
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1
+numpy==2.1.2
+# GUI build of OpenCV (bridge/calibrate.py needs cv2.selectROI and imshow; the headless build has no GUI)
+opencv-python
+pygame==2.3.0
+pyserial==3.5
+tyro==1.0.16
+
+# multi-agent-ale-py: ONLY needed by play_pc.py (the PC emulator). bridge/ does not need it.
+# Wheels exist only for Python <= 3.9. On Python 3.10+ (or Apple Silicon / Windows) it builds from source and needs
+# cmake and a C++ compiler. If you only use the console bridge, skip this line.
+multi-agent-ale-py==0.1.11
