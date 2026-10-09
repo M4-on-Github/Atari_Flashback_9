@@ -228,8 +228,8 @@ class Policy:                        # wraps an exported model.ts + config.json
     def act(self, obs: np.ndarray) -> int   # obs (6,84,84) uint8 -> action index
 ```
 
-Levels: `hard` = argmax; `medium` = sample with temperature 1.0; `easy` = sample with temperature 1.5 and 15%
-random actions. (Also `--level` on the CLIs.)
+Levels (all sample from the softmax; argmax is weak when several actions do the same thing): `hard` = temperature 1.0;
+`medium` = temperature 1.25; `easy` = temperature 1.5 and 15% uniformly random actions. The evaluator samples at T=1 too. (Also `--level` on the CLIs.)
 
 ### 5.2 `play_pc.py`
 

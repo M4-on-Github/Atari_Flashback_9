@@ -9,13 +9,15 @@ import numpy as np
 import torch
 
 LEVELS = ("hard", "medium", "easy")
-EASY_TEMPERATURE = 1.5
-MEDIUM_TEMPERATURE = 1.0
+# Every level samples. Argmax is weak: several actions often do the same thing (Surround: NOOP = keep going =
+# pressing the current direction), the entropy bonus spreads probability over them, and argmax then picks a lone
+# turn over a split "keep going". Sampling at T=1 is the policy PPO actually optimised.
+TEMPERATURE = {"hard": 1.0, "medium": 1.25, "easy": 1.5}
 EASY_RANDOM_P = 0.15
 
 
 class Policy:
-    """Action index policy. hard = argmax, medium = softmax sample (T=1), easy = softmax sample (T=1.5) + 15% random."""
+    """Action index policy. Softmax sample: hard T=1, medium T=1.25, easy T=1.5 + 15% random actions."""
 
     def __init__(self, model_dir: str, level: str = "hard"):
         if level not in LEVELS:
@@ -39,9 +41,7 @@ class Policy:
     def act(self, obs: np.ndarray) -> int:
         """obs (6,84,84) uint8 -> action index in [0, num_actions)."""
         logits = self.logits(obs)
-        if self.level == "hard":
-            return int(np.argmax(logits))
-        temperature = MEDIUM_TEMPERATURE if self.level == "medium" else EASY_TEMPERATURE
+        temperature = TEMPERATURE[self.level]
         if self.level == "easy" and self.rng.random() < EASY_RANDOM_P:
             return int(self.rng.integers(self.num_actions))
         z = logits / temperature

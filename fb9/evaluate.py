@@ -69,9 +69,13 @@ class Episode:
     opp_ret: float
 
 
+_GEN = torch.Generator().manual_seed(0)
+
+
 @torch.no_grad()
-def _greedy(requests: list[tuple[Agent, np.ndarray]]) -> list[int]:
-    """Argmax action for each (net, obs (6,84,84) uint8); requests sharing a net run as one batch."""
+def _act(requests: list[tuple[Agent, np.ndarray]]) -> list[int]:
+    """Sampled action (T=1, as at play time, see fb9/policy.py) for each (net, obs (6,84,84) uint8); requests
+    sharing a net run as one batch. Not argmax: argmax is weak when several actions do the same thing."""
     out = [0] * len(requests)
     groups: dict[int, list[int]] = {}
     nets: dict[int, Agent] = {}
@@ -81,7 +85,8 @@ def _greedy(requests: list[tuple[Agent, np.ndarray]]) -> list[int]:
     for key, idxs in groups.items():
         obs = torch.from_numpy(np.stack([requests[k][1] for k in idxs]))
         logits, _ = nets[key](obs)
-        for k, a in zip(idxs, logits.argmax(dim=-1).tolist()):
+        acts = torch.multinomial(torch.softmax(logits.float(), dim=-1), 1, generator=_GEN)[:, 0]
+        for k, a in zip(idxs, acts.tolist()):
             out[k] = int(a)
     return out
 
@@ -134,9 +139,9 @@ def _run_jobs(jobs: list[Job], game_name: str, concurrency: int, max_steps: int 
                 opp_slots.append(s)
             else:
                 actions[s][1 - job.seat] = st.bot.act(games[s].render_rgb(), 1 - job.seat)
-        for s, a in zip(agent_slots, _greedy(agent_req)):
+        for s, a in zip(agent_slots, _act(agent_req)):
             actions[s][jobs[active[s].job_idx].seat] = a
-        for s, a in zip(opp_slots, _greedy(opp_req)):
+        for s, a in zip(opp_slots, _act(opp_req)):
             actions[s][1 - jobs[active[s].job_idx].seat] = a
 
         for s in list(active):
@@ -195,9 +200,9 @@ def _write_video(path: Path, game_name: str, agent: Agent, opp_kind: str, opp_ne
         frame = np.ascontiguousarray(rgb[:, :, ::-1])
         writer.write(cv2.resize(frame, None, fx=VIDEO_SCALE, fy=VIDEO_SCALE, interpolation=cv2.INTER_NEAREST))
         actions = np.zeros(2, dtype=np.int64)
-        actions[0] = _greedy([(agent, obs[0])])[0]
+        actions[0] = _act([(agent, obs[0])])[0]
         if opp_kind == "net":
-            actions[1] = _greedy([(opp_net, obs[1])])[0]
+            actions[1] = _act([(opp_net, obs[1])])[0]
         else:
             actions[1] = bot.act(rgb, 1)
         obs, _, done, _ = game.step(actions)

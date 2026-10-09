@@ -164,9 +164,9 @@ Otherwise extend the run from its checkpoint.
 
 | Level | Checkpoint | Action selection |
 |---|---|---|
-| Easy | early checkpoint | sampling, temperature 1.5, plus 20% random actions |
-| Medium | mid checkpoint | sampling, T = 1 |
-| Hard | best checkpoint | sampling, T = 0.5 (pure argmax can get stuck in loops) |
+| Easy | early checkpoint | sampling, temperature 1.5, plus 15% random actions |
+| Medium | mid checkpoint | sampling, T = 1.25 |
+| Hard | best checkpoint | sampling, T = 1 (argmax and low T are weak: NOOP / current direction alias "keep going", see §8) |
 
 ### 4.10 Where training time goes, and how we speed it up
 
@@ -297,7 +297,7 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
 | PyTorch 2.5.1 runs on the 1080 Ti (sm_61) | Probe: CUDA available, conv test passes | Claude | ✅ |
 | Agent names, action sets, modes, episode lengths, which agent is P1 | Probe (facts below the table) | Claude | ✅ |
 | Real samples/s → final training hours | A4 benchmark | Claude | ✅ |
-| Scripted Surround bot: grid parsing from pixels | A3 | Claude | ⏳ |
+| Scripted Surround bot: grid parsing from pixels | `fb9/bots.py`: 38×18 grid of 4×9-px cells; flood-fill bot wins 40/40 rounds vs random | Claude | ✅ |
 | Player colors still distinguishable in grayscale (§4.1) | Yes: Surround players gray 64 vs 147 (bg 90, walls 167); Combat mode 2 tanks 124 vs 146 (bg 102, maze 208). Grayscale kept | Claude | ✅ |
 | `combat_tank_v2` flag defaults (maze / billiard / invisible) and which mode they map to | mode = {1,8,10,13}[invisible,billiard] + has_maze. Default = 9 (Tank-Pong). We use **mode 2** | Claude | ✅ |
 | Console has two 9-pin trapezoid joystick sockets on the front ("FB9" = Atari Flashback 9) | Look at the console | **You** | ❓ |
@@ -319,6 +319,13 @@ runs/  checkpoints/  models/ # outputs (runs/ and checkpoints/ gitignored)
   logic, but different colors and a taller screen. Full 18-action set, 27 modes, screen **256×160**. Fixed 8,181-frame games (2:16 timer);
   ±1 per hit, zero-sum. Colors differ per mode (mode 2: olive background, blue/pink tanks).
 - Speed: ~3,000–3,300 raw frames/s per core through PettingZoo.
+
+**Training facts** (`surround_v1`):
+
+- Never act by argmax. In Surround NOOP, "press the current direction" (and probably the reverse direction) all mean
+  "keep going"; the entropy bonus spreads probability over them, so argmax picks a lone turn and the snake steers into
+  walls. At 15M samples the argmax agent lost 1–9 to the 5M checkpoint, while sampled play won 6–2. Play levels and the
+  evaluator sample (§4.9).
 
 ## 9. Risks and mitigations
 

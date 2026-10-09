@@ -71,19 +71,22 @@ def write_video(path: str, n_frames: int = 120) -> None:
 
 # ---------- policy ----------
 
-def test_policy_hard_is_argmax_and_deterministic():
+def test_policy_hard_samples_from_softmax():
     with tempfile.TemporaryDirectory() as d:
         write_dummy_model(d, "surround")
         pol = Policy(d, "hard")
+        pol.rng = np.random.default_rng(0)
         assert pol.num_actions == 5 and pol.action_names == GAMES["surround"].action_names
         rng = np.random.default_rng(0)
-        for _ in range(5):
-            obs = rng.integers(0, 256, size=(6, 84, 84), dtype=np.uint8)
-            logits = pol.logits(obs)
-            assert logits.shape == (5,)
-            acts = {pol.act(obs) for _ in range(10)}
-            assert acts == {int(np.argmax(logits))}, (acts, logits)
-        # the model output really depends on the observation (otherwise the argmax check is vacuous)
+        obs = rng.integers(0, 256, size=(6, 84, 84), dtype=np.uint8)
+        logits = pol.logits(obs)
+        assert logits.shape == (5,)
+        p = np.exp(logits - logits.max())
+        p /= p.sum()
+        n = 4000
+        freq = np.bincount([pol.act(obs) for _ in range(n)], minlength=5) / n
+        assert np.abs(freq - p).max() < 0.03, (freq, p)
+        # the model output really depends on the observation
         a = rng.integers(0, 256, size=(6, 84, 84), dtype=np.uint8)
         b = rng.integers(0, 256, size=(6, 84, 84), dtype=np.uint8)
         assert not np.allclose(pol.logits(a), pol.logits(b))
